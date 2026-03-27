@@ -549,27 +549,42 @@ def is_daily_loss_exceeded() -> bool:
         return False
     try:
         with open(ORDER_QUEUE_PATH, "r", encoding="utf-8") as f:
-            orders = json.load(f)
+            queue_data = json.load(f)
+        orders = queue_data.get("orders", [])
     except (json.JSONDecodeError, OSError):
         return False
 
     today_str = date.today().isoformat()
     daily_loss = 0
 
+    # auto_positions에서 매수가 참조 (손익 계산용)
+    buy_prices: dict[str, int] = {}
+    try:
+        positions = load_auto_positions()
+        for t, p in positions.items():
+            buy_prices[t] = int(p.get("buy_price", 0))
+    except Exception:
+        pass
+
     for order in orders:
         if not isinstance(order, dict):
             continue
         # 오늘 체결된 매도 주문만
-        filled_at = order.get("filled_at", "")
-        if not filled_at.startswith(today_str):
+        executed_at = order.get("executed_at", "")
+        if not executed_at or not executed_at[:10] == today_str:
             continue
         if order.get("side") != "sell":
             continue
-        if order.get("status") != "filled":
+        if order.get("status") != "executed":
             continue
-        pnl = order.get("pnl", 0)
-        if pnl < 0:
-            daily_loss += abs(pnl)
+        # 손익 계산: (매도 체결가 - 매수가) * 수량
+        sell_price = int(order.get("exec_price") or 0)
+        buy_price = buy_prices.get(order.get("ticker", ""), 0)
+        qty = int(order.get("quantity", 0))
+        if sell_price > 0 and buy_price > 0 and qty > 0:
+            pnl = (sell_price - buy_price) * qty
+            if pnl < 0:
+                daily_loss += abs(pnl)
 
     exceeded = daily_loss >= MAX_DAILY_LOSS
     if exceeded:

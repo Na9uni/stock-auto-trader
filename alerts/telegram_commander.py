@@ -213,23 +213,23 @@ def _handle_balance(chat_id: str) -> None:
         lines.append("\n📋 <b>보유 포지션</b>")
         for ticker, pos in pos_items:
             qty = pos.get("qty", 0)
-            avg_price = pos.get("avg_price", 0)
+            buy_price = pos.get("buy_price", 0)
             # kiwoom_data에서 현재가 매칭
             stock_info = stocks.get(ticker, {})
-            cur_price = stock_info.get("current_price", 0) or avg_price
+            cur_price = stock_info.get("current_price", 0) or buy_price
             name = stock_info.get("name", ticker)
 
-            if avg_price > 0 and cur_price > 0:
-                pnl_pct = (cur_price - avg_price) / avg_price * 100
-                pnl_amt = (cur_price - avg_price) * qty
+            if buy_price > 0 and cur_price > 0:
+                pnl_pct = (cur_price - buy_price) / buy_price * 100
+                pnl_amt = (cur_price - buy_price) * qty
                 sign = "+" if pnl_pct >= 0 else ""
                 lines.append(
                     f"  [{ticker}] {name}\n"
-                    f"    수량: {qty}주 | 평균가: {avg_price:,.0f}원\n"
+                    f"    수량: {qty}주 | 평균가: {buy_price:,.0f}원\n"
                     f"    현재가: {cur_price:,.0f}원 | 손익: {sign}{pnl_pct:.2f}% ({sign}{pnl_amt:,.0f}원)"
                 )
             else:
-                lines.append(f"  [{ticker}] {name} | 수량: {qty}주 | 평균가: {avg_price:,.0f}원")
+                lines.append(f"  [{ticker}] {name} | 수량: {qty}주 | 평균가: {buy_price:,.0f}원")
     else:
         lines.append("\n보유 포지션 없음")
 
@@ -499,11 +499,24 @@ def _enqueue_order(order: dict) -> bool:
 
         orders: list = queue.get("orders", [])
         # kiwoom_collector 호환 필드 추가
+        import uuid
+        from datetime import datetime as _dt
         enriched_order = {
             **order,
+            "id": str(uuid.uuid4())[:8],
             "status": "pending",
             "quantity": order.get("qty", 0),
+            "price": 0,
             "order_type": 1 if order.get("side") == "buy" else 2,
+            "rule_name": "텔레그램_수동",
+            "mock_mode": False,
+            "created_at": _dt.now().strftime("%Y-%m-%dT%H:%M:%S"),
+            "submitted_at": None,
+            "executed_at": None,
+            "exec_price": None,
+            "order_number": None,
+            "cumul_exec_qty": 0,
+            "fail_reason": None,
         }
         updated_queue = {**queue, "orders": [*orders, enriched_order]}
         return _write_json(_ORDER_QUEUE, updated_queue)
