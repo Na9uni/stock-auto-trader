@@ -381,6 +381,7 @@ def detect(
     df: pd.DataFrame,
     exec_strength: float = 0.0,
     change_rate: float = 0.0,
+    orderbook: dict | None = None,
 ) -> SignalResult:
     """
     5분봉 기반 단타 신호 감지.
@@ -390,9 +391,11 @@ def detect(
     df : pd.DataFrame
         OHLCV + 보조지표 컬럼 포함 DataFrame (원본 수정 안 함)
     exec_strength : float
-        체결 강도 (현재 미사용, 확장 가능)
+        체결 강도 (100 기준, 150 이상=강세, 70 이하=약세)
     change_rate : float
         당일 등락률 (%) — 예: -3.5 → -3.5%
+    orderbook : dict | None
+        호가 데이터 {"ask": [...], "bid": [...]}
 
     Returns
     -------
@@ -423,6 +426,33 @@ def detect(
     if _vol_ratio_val is not None and _vol_ratio_val < 0.3:
         sell_score -= 1
         sell_reasons.append(f"거래량 급감({_vol_ratio_val:.2f}배)")
+
+    # 체결강도 활용 (기존에 파라미터만 받고 미사용이었음)
+    if exec_strength > 0:
+        if exec_strength >= 150:
+            buy_score += 1
+            buy_reasons.append(f"체결강도 강세({exec_strength:.0f})")
+        elif exec_strength <= 70:
+            sell_score -= 1
+            sell_reasons.append(f"체결강도 약세({exec_strength:.0f})")
+
+    # OBI (Order Book Imbalance) — orderbook이 있을 때만
+    if orderbook:
+        bids = orderbook.get("bid", [])
+        asks = orderbook.get("ask", [])
+        if bids and asks:
+            # 가중 OBI: 가까운 호가에 높은 가중치
+            w_bid = sum(b.get("qty", 0) / (i + 1) for i, b in enumerate(bids))
+            w_ask = sum(a.get("qty", 0) / (i + 1) for i, a in enumerate(asks))
+            total = w_bid + w_ask
+            if total > 0:
+                obi = (w_bid - w_ask) / total
+                if obi > 0.3:
+                    buy_score += 1
+                    buy_reasons.append(f"호가 매수우세(OBI={obi:.2f})")
+                elif obi < -0.3:
+                    sell_score -= 1
+                    sell_reasons.append(f"호가 매도우세(OBI={obi:.2f})")
 
     total_score = buy_score + sell_score
 
@@ -466,6 +496,7 @@ def detect(
 def detect_daily(
     df: pd.DataFrame,
     change_rate: float = 0.0,
+    orderbook: dict | None = None,
 ) -> SignalResult:
     """
     일봉 기반 스윙 신호 감지.

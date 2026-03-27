@@ -1125,8 +1125,21 @@ def check_auto_positions() -> None:
         elif trailing_activated and drop_from_high >= ts_pct:
             reason = f"트레일링 스탑 (최고 {high_price:,}원 → {current_price:,}원, -{drop_from_high:.1f}%)"
 
+        # 4) 시간 기반 청산: 2시간 보유 + 수익 0.5% 미만
         else:
-            continue
+            bought_at = pos.get("bought_at", "")
+            if bought_at and pct < 0.5 and not stale_data:
+                try:
+                    bought_dt = datetime.strptime(bought_at, "%Y-%m-%dT%H:%M:%S")
+                    hold_minutes = (datetime.now() - bought_dt).total_seconds() / 60
+                    if hold_minutes >= 120:
+                        reason = f"시간청산 ({hold_minutes:.0f}분 보유, {pct:+.1f}%)"
+                    else:
+                        continue
+                except Exception:
+                    continue
+            else:
+                continue
 
         # 매도 실행
         pnl = (current_price - buy_price) * qty
@@ -1170,7 +1183,8 @@ def _run_signal_for_stock(ticker: str, name: str, stock: dict,
         change_rate = float(stock.get("change_rate") or 0.0)
     except (ValueError, TypeError):
         change_rate = 0.0
-    signal = detect(df_ind, exec_strength=exec_strength, change_rate=change_rate)
+    orderbook = stock.get("orderbook")
+    signal = detect(df_ind, exec_strength=exec_strength, change_rate=change_rate, orderbook=orderbook)
 
     if signal.signal_type == SignalType.NEUTRAL or signal.strength != SignalStrength.STRONG:
         logger.debug("%s: 신호 강도 부족 (strength=%s, score=%d)", name, signal.strength.name, signal.score)
@@ -1303,12 +1317,17 @@ def check_daily_signals() -> None:
 
             signal = detect_daily(df_ind, change_rate=change_rate)
 
-            # 대형주 완화: score≥4면 STRONG으로 취급
+            # 스윙 모드: 일봉 score >= 4이면 전체 종목 STRONG 승격
             is_largecap = ticker in LARGECAP_DAILY_THRESHOLD
             if signal.signal_type == SignalType.NEUTRAL:
                 continue
             if signal.strength != SignalStrength.STRONG:
-                if is_largecap and abs(signal.score) >= LARGECAP_DAILY_MIN_SCORE:
+                if abs(signal.score) >= 4:
+                    logger.info(
+                        "[스윙 승격] %s 일봉 score=%d → STRONG",
+                        name, signal.score,
+                    )
+                elif is_largecap and abs(signal.score) >= LARGECAP_DAILY_MIN_SCORE:
                     logger.info(
                         "[대형주 완화] %s 일봉 score=%d → STRONG 승격",
                         name, signal.score,
