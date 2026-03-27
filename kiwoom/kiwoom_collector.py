@@ -104,6 +104,29 @@ def _safe_float(value: str, default: float = 0.0) -> float:
         return default
 
 
+def align_tick_size(price: int, direction: str = "down") -> int:
+    """한국 주식시장 호가 단위에 맞춤.
+    direction: "up"=올림, "down"=내림
+    """
+    if price < 2000:
+        tick = 1
+    elif price < 5000:
+        tick = 5
+    elif price < 20000:
+        tick = 10
+    elif price < 50000:
+        tick = 50
+    elif price < 200000:
+        tick = 100
+    elif price < 500000:
+        tick = 500
+    else:
+        tick = 1000
+    if direction == "up":
+        return ((price + tick - 1) // tick) * tick
+    return (price // tick) * tick
+
+
 def _is_market_open() -> bool:
     """Check if today is a Korean trading day (weekday + not holiday)."""
     now = datetime.now()
@@ -286,6 +309,10 @@ class KiwoomAPI(QAxWidget):
         volume = _safe_int(self._get_comm_data(trcode, rqname, 0, "거래량"))
         high = _safe_int(self._get_comm_data(trcode, rqname, 0, "고가"))
         low = _safe_int(self._get_comm_data(trcode, rqname, 0, "저가"))
+        exec_strength = _safe_float(self._get_comm_data(trcode, rqname, 0, "체결강도"))
+        prev_close = _safe_int(self._get_comm_data(trcode, rqname, 0, "기준가"))
+        prev_volume = _safe_int(self._get_comm_data(trcode, rqname, 0, "전일거래량"))
+        trade_amount = _safe_int(self._get_comm_data(trcode, rqname, 0, "거래대금"))
 
         self._tr_data["opt10001"] = {
             "current_price": abs(price),
@@ -294,6 +321,10 @@ class KiwoomAPI(QAxWidget):
             "high": abs(high),
             "low": abs(low),
             "volume": volume,
+            "exec_strength": float(exec_strength or 0),
+            "prev_close": abs(prev_close),
+            "prev_volume": abs(prev_volume),
+            "trade_amount": abs(trade_amount),
         }
 
     # ----- opt10080: 5-minute candles -----
@@ -744,6 +775,10 @@ class KiwoomCollector:
             updated["high"] = basic["high"]
             updated["low"] = basic["low"]
             updated["volume"] = basic["volume"]
+            updated["exec_strength"] = basic.get("exec_strength", 0.0)
+            updated["prev_close"] = basic.get("prev_close", 0)
+            updated["prev_volume"] = basic.get("prev_volume", 0)
+            updated["trade_amount"] = basic.get("trade_amount", 0)
         if candles_1m is not None:
             updated["candles_1m"] = candles_1m
         if candles_1d is not None:

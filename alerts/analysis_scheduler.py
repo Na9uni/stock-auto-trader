@@ -29,7 +29,20 @@ from analysis.indicators import TechnicalIndicators
 
 ROOT = Path(__file__).parent.parent
 load_dotenv(ROOT / ".env")
+
+# 로거 설정
+(ROOT / "logs").mkdir(parents=True, exist_ok=True)
 logger = logging.getLogger("stock_analysis")
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    _fh = logging.FileHandler(
+        str(ROOT / "logs" / "stock_analysis.log"), encoding="utf-8"
+    )
+    _fh.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s %(message)s"))
+    _ch = logging.StreamHandler()
+    _ch.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.addHandler(_fh)
+    logger.addHandler(_ch)
 
 KIWOOM_DATA_PATH = ROOT / "data" / "kiwoom_data.json"
 AUTO_POSITIONS_PATH = ROOT / "data" / "auto_positions.json"
@@ -868,6 +881,22 @@ def _cleanup_failed_positions(positions: dict) -> dict:
     return positions
 
 
+# ── 서킷브레이커/급락 감지 ─────────────────────────────────────────
+
+def _is_market_crash() -> bool:
+    """KOSPI/KOSDAQ 지수 -3% 이상 급락 시 매수 전면 중단."""
+    try:
+        indices = fetch_index_prices()
+        for idx_name, data in indices.items():
+            change = data.get("change_pct", 0)
+            if change <= -3.0:
+                logger.warning("[급락 감지] %s %.1f%% — 매수 전면 중단", idx_name, change)
+                return True
+    except Exception:
+        pass
+    return False
+
+
 # ── 자동매매 실행 ──────────────────────────────────────────────────
 
 def _auto_trade(ticker: str, name: str, signal: SignalResult,
@@ -878,6 +907,21 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
     if not AUTO_TRADE_ENABLED or OPERATION_MODE != "LIVE":
         return
     if not is_whitelisted(ticker):
+        return
+
+    # ── 시간 제한 ──
+    now = datetime.now()
+    # 09:00~09:10 장 시작 10분 매수 차단
+    if now.hour == 9 and now.minute < 10:
+        logger.debug("[시간 제한] 장 시작 10분 이내 — 매수 보류")
+        return
+    # 15:00 이후 신규 매수 차단 (매도는 허용)
+    if now.hour >= 15 and signal.signal_type == SignalType.BUY:
+        logger.debug("[시간 제한] 15시 이후 — 신규 매수 차단")
+        return
+
+    # ── 서킷브레이커/급락 대응 ──
+    if signal.signal_type == SignalType.BUY and _is_market_crash():
         return
 
     # ── 매수 ──
@@ -958,7 +1002,8 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
         if qty <= 0:
             return
 
-        sell_result = execute_sell(ticker, name, qty,
+        current_price = int(stock.get("current_price", 0))
+        sell_result = execute_sell(ticker, name, qty, current_price,
                                    rule_name=f"자동매매_{signal.strength.name}")
         if sell_result.get("status") == "pending":
             fresh = load_auto_positions()
@@ -1031,6 +1076,25 @@ def check_auto_positions() -> None:
             changed = True
             logger.info("[트레일링] %s 활성화 (수익 %.1f%% ≥ %.1f%%)", name, pct, ta_pct)
 
+            # 분할 익절: 보유 수량의 50% 매도
+            half_qty = qty // 2
+            if half_qty > 0:
+                sell_res = execute_sell(ticker, name, half_qty,
+                                        current_price, rule_name="자동청산_분할익절")
+                if sell_res.get("status") == "pending":
+                    positions[ticker]["partial_sell_qty"] = half_qty
+                    positions[ticker]["partial_sell_order_id"] = sell_res.get("order_id", "")
+                    # qty는 체결 확인 후 줄임 (check_order_status에서 처리)
+                    # selling 플래그는 안 세움 (나머지는 트레일링으로 관리)
+                    logger.info("[분할 익절] %s %d주 매도 접수 (수익 %.1f%%)", name, half_qty, pct)
+                    notifier.send_to_users(
+                        [get_admin_id()],
+                        f"📊 [분할 익절] {name}\n"
+                        f"수량: {half_qty}주 / 수익: {pct:+.1f}%\n"
+                        f"잔여 {qty - half_qty}주 트레일링 관리"
+                        + CMD_FOOTER,
+                    )
+
         # RSI 조회
         rsi = 50.0
         try:
@@ -1066,7 +1130,7 @@ def check_auto_positions() -> None:
 
         # 매도 실행
         pnl = (current_price - buy_price) * qty
-        sell_res = execute_sell(ticker, name, qty,
+        sell_res = execute_sell(ticker, name, qty, current_price,
                                 rule_name=f"자동청산_{reason[:10]}")
         if sell_res.get("status") == "pending":
             positions[ticker]["selling"] = True
@@ -1111,6 +1175,26 @@ def _run_signal_for_stock(ticker: str, name: str, stock: dict,
     if signal.signal_type == SignalType.NEUTRAL or signal.strength != SignalStrength.STRONG:
         logger.debug("%s: 신호 강도 부족 (strength=%s, score=%d)", name, signal.strength.name, signal.score)
         return
+
+    # 일봉 추세 게이트: MA20 상승 + RSI 35~65
+    if signal.signal_type == SignalType.BUY:
+        daily_candles = stock.get("candles_1d", [])
+        if len(daily_candles) >= 25:
+            df_daily = candles_to_df(daily_candles)
+            df_daily_ind = calc_indicators(df_daily)
+            if df_daily_ind is not None:
+                last_daily = df_daily_ind.iloc[-1]
+                daily_ma20 = last_daily.get("ma20", 0)
+                prev_daily_ma20 = df_daily_ind.iloc[-5].get("ma20", 0) if len(df_daily_ind) >= 5 else 0
+                daily_rsi = last_daily.get("rsi", 50)
+                # MA20 하락 중이면 매수 차단
+                if daily_ma20 > 0 and prev_daily_ma20 > 0 and daily_ma20 < prev_daily_ma20:
+                    logger.debug("[일봉 필터] %s MA20 하락 중 → 매수 보류", name)
+                    return
+                # RSI 극단값이면 차단
+                if daily_rsi > 75 or daily_rsi < 25:
+                    logger.debug("[일봉 필터] %s 일봉 RSI %.0f 극단값 → 매수 보류", name, daily_rsi)
+                    return
 
     # 매도 신호는 보유 종목에만
     if signal.signal_type == SignalType.SELL:
@@ -1487,6 +1571,26 @@ def check_order_status() -> None:
                 logger.info("[주문 %s] %s %s %d주 (ID=%s)", label, name, side_kor, quantity, order_id[:8])
         except Exception as e:
             logger.error("[주문 알림 실패] %s: %s", order_id, e)
+
+        # 분할 익절 체결/실패 → qty 조정 (포지션 삭제 안 함)
+        if side == "sell" and rule_name == "자동청산_분할익절":
+            positions = load_auto_positions()
+            if ticker in positions:
+                p_sell_oid = positions[ticker].get("partial_sell_order_id", "")
+                if p_sell_oid and p_sell_oid == order_id:
+                    if status == "executed":
+                        partial_qty = positions[ticker].pop("partial_sell_qty", 0)
+                        positions[ticker].pop("partial_sell_order_id", None)
+                        if partial_qty > 0:
+                            positions[ticker]["qty"] = max(1, int(positions[ticker].get("qty", 0)) - partial_qty)
+                        save_auto_positions(positions)
+                        logger.info("[분할 익절 체결] %s %d주 확정", name, partial_qty)
+                    elif status == "failed":
+                        positions[ticker].pop("partial_sell_qty", None)
+                        positions[ticker].pop("partial_sell_order_id", None)
+                        save_auto_positions(positions)
+                        logger.warning("[분할 익절 실패] %s qty 원복 (변경 없음)", name)
+            continue  # 분할 익절은 아래 포지션 삭제 로직으로 가면 안 됨
 
         # 매도 체결 → 포지션 삭제 + 손익 기록
         if status == "executed" and side == "sell" and rule_name.startswith(("자동매매_", "자동청산_", "스윙_")):

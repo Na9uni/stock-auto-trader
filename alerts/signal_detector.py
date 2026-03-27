@@ -51,15 +51,15 @@ class SignalResult:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _safe_float(value) -> float | None:
-    """값이 NaN이거나 None이면 None 반환, 그 외 float 반환."""
+def _safe_float(value, default: float | None = None) -> float | None:
+    """값이 NaN이거나 None이면 default 반환, 그 외 float 반환."""
     if value is None:
-        return None
+        return default
     try:
         v = float(value)
-        return None if np.isnan(v) else v
+        return default if np.isnan(v) else v
     except (TypeError, ValueError):
-        return None
+        return default
 
 
 def _get_row(df: pd.DataFrame, iloc: int) -> dict:
@@ -156,8 +156,9 @@ def _buy_scores(row: dict, prev_row: dict, df: pd.DataFrame) -> tuple[int, list[
           and prev_macd_hist > 0 and macd_hist <= 0):
         macd_cross = "dead"
 
-    # 4. MACD 히스토그램 증가 중 : +1
-    if (macd_hist is not None and prev_macd_hist is not None
+    # 4. MACD 히스토그램 증가 중 : +1 (골든크로스 봉에서는 중복 가산 방지)
+    if (macd_cross != "golden"
+            and macd_hist is not None and prev_macd_hist is not None
             and macd_hist > prev_macd_hist):
         score += 1
         reasons.append("MACD 히스토그램 증가")
@@ -174,14 +175,19 @@ def _buy_scores(row: dict, prev_row: dict, df: pd.DataFrame) -> tuple[int, list[
             score += 2
             reasons.append("볼린저 하단 복귀")
 
-    # 6. MA5 > MA20 정배열 : +1
+    # 6~10. 이평선 관련 점수 (ADX < 20 횡보장이면 50% 감점)
     ma5 = _safe_float(row.get("ma5") or row.get("MA5"))
     ma20 = _safe_float(row.get("ma20") or row.get("MA20"))
     ma60 = _safe_float(row.get("ma60") or row.get("MA60"))
+    adx_val = _safe_float(row.get("adx"))
 
+    ma_score = 0
+    ma_reasons: list[str] = []
+
+    # 6. MA5 > MA20 정배열 : +1
     if ma5 is not None and ma20 is not None and ma5 > ma20:
-        score += 1
-        reasons.append("MA5>MA20 정배열")
+        ma_score += 1
+        ma_reasons.append("MA5>MA20 정배열")
 
     # 7. MA20 상승 추세 (최근 5봉 기울기 > 0.1%) : +1
     ma20_col = None
@@ -198,15 +204,30 @@ def _buy_scores(row: dict, prev_row: dict, df: pd.DataFrame) -> tuple[int, list[
             if base is not None and last is not None and base > 0:
                 slope_pct = (last - base) / base * 100
                 if slope_pct > 0.1:
-                    score += 1
-                    reasons.append(f"MA20 상승 추세(+{slope_pct:.2f}%)")
+                    ma_score += 1
+                    ma_reasons.append(f"MA20 상승 추세(+{slope_pct:.2f}%)")
 
     # 8. MA5 지지 근접 (종가가 MA5의 ±1% 이내이고 MA5 위) : +1
     if close is not None and ma5 is not None and ma5 > 0:
         diff_pct = abs(close - ma5) / ma5 * 100
         if diff_pct <= 1.0 and close >= ma5:
-            score += 1
-            reasons.append(f"MA5 지지 근접(diff={diff_pct:.2f}%)")
+            ma_score += 1
+            ma_reasons.append(f"MA5 지지 근접(diff={diff_pct:.2f}%)")
+
+    # 10. 3중 정배열 (MA5>MA20>MA60) : +1  (일봉은 +2로 오버라이드됨)
+    if (ma5 is not None and ma20 is not None and ma60 is not None
+            and ma5 > ma20 > ma60):
+        ma_score += 1
+        ma_reasons.append("3중 정배열(MA5>MA20>MA60)")
+
+    # ADX < 20 횡보장: 이평선 관련 점수 50% 감점
+    if adx_val is not None and adx_val < 20 and ma_score > 0:
+        original_ma = ma_score
+        ma_score = ma_score // 2
+        ma_reasons.append(f"ADX 횡보({adx_val:.1f}) → MA 점수 감점({original_ma}→{ma_score})")
+
+    score += ma_score
+    reasons.extend(ma_reasons)
 
     # 9. 거래량 2배 이상 급증 : +1
     vol_ratio = _compute_vol_ratio(df)
@@ -214,16 +235,45 @@ def _buy_scores(row: dict, prev_row: dict, df: pd.DataFrame) -> tuple[int, list[
         score += 1
         reasons.append(f"거래량 급증({vol_ratio:.1f}배)")
 
-    # 10. 3중 정배열 (MA5>MA20>MA60) : +1  (일봉은 +2로 오버라이드됨)
-    if (ma5 is not None and ma20 is not None and ma60 is not None
-            and ma5 > ma20 > ma60):
+    # 11. 스토캐스틱 과매도 (%K < 20 AND %D < 20) : +1
+    stoch_k = _safe_float(row.get("stoch_k"))
+    stoch_d = _safe_float(row.get("stoch_d"))
+    if stoch_k is not None and stoch_d is not None and stoch_k < 20 and stoch_d < 20:
         score += 1
-        reasons.append("3중 정배열(MA5>MA20>MA60)")
+        reasons.append(f"스토캐스틱 과매도(K={stoch_k:.1f}, D={stoch_d:.1f})")
+
+    # 12. OBV 상승 다이버전스 (가격 하락 but OBV 상승, 5봉 기준) : +1
+    obv_col = "obv" if "obv" in df.columns else None
+    close_col = "close" if "close" in df.columns else ("종가" if "종가" in df.columns else None)
+    if obv_col is not None and close_col is not None and len(df) >= 5:
+        close_5ago = _safe_float(df[close_col].iloc[-5])
+        close_now = _safe_float(df[close_col].iloc[-1])
+        obv_5ago = _safe_float(df[obv_col].iloc[-5])
+        obv_now = _safe_float(df[obv_col].iloc[-1])
+        if (close_5ago is not None and close_now is not None
+                and obv_5ago is not None and obv_now is not None):
+            if close_now < close_5ago and obv_now > obv_5ago:
+                score += 1
+                reasons.append("OBV 상승 다이버전스")
+
+    # 13. 지지선 근접 (종가가 support의 ±1% 이내이고 support 위) : +1
+    support = _safe_float(row.get("support"))
+    if close is not None and support is not None and support > 0:
+        support_diff_pct = abs(close - support) / support * 100
+        if support_diff_pct <= 1.0 and close >= support:
+            score += 1
+            reasons.append(f"지지선 근접(diff={support_diff_pct:.2f}%)")
+
+    # 14. VWAP 상회 : +1
+    vwap = _safe_float(row.get("vwap"))
+    if close is not None and vwap is not None and close > vwap:
+        score += 1
+        reasons.append("VWAP 상회")
 
     return score, reasons
 
 
-def _sell_scores(row: dict, prev_row: dict) -> tuple[int, list[str]]:
+def _sell_scores(row: dict, prev_row: dict, df: pd.DataFrame | None = None) -> tuple[int, list[str]]:
     """매도 점수 합산(음수). (점수, reasons) 반환."""
     score = 0
     reasons: list[str] = []
@@ -257,12 +307,55 @@ def _sell_scores(row: dict, prev_row: dict) -> tuple[int, list[str]]:
     # 4. MA5 < MA20 역배열 : -1
     ma5 = _safe_float(row.get("ma5") or row.get("MA5"))
     ma20 = _safe_float(row.get("ma20") or row.get("MA20"))
+    ma60 = _safe_float(row.get("ma60") or row.get("MA60"))
     if ma5 is not None and ma20 is not None and ma5 < ma20:
         score -= 1
         reasons.append("MA5<MA20 역배열")
 
     # 5. 거래량 급감 (vol_ratio < 0.3) : -1  (이 함수 호출 전 df 없으므로 외부에서 주입)
-    # → _sell_scores_with_vol 로 분리하지 않고 caller 에서 처리
+    # → caller 에서 처리
+
+    # 6. 3중 역배열 (MA5 < MA20 < MA60) : -2
+    if (ma5 is not None and ma20 is not None and ma60 is not None
+            and ma5 < ma20 < ma60):
+        score -= 2
+        reasons.append("3중 역배열(MA5<MA20<MA60)")
+
+    # 7. 스토캐스틱 과매수 (%K > 80 AND %D > 80) : -1
+    stoch_k = _safe_float(row.get("stoch_k"))
+    stoch_d = _safe_float(row.get("stoch_d"))
+    if stoch_k is not None and stoch_d is not None and stoch_k > 80 and stoch_d > 80:
+        score -= 1
+        reasons.append(f"스토캐스틱 과매수(K={stoch_k:.1f}, D={stoch_d:.1f})")
+
+    # 8. OBV 하락 다이버전스 (가격 상승 but OBV 하락, 5봉 기준) : -1
+    if df is not None:
+        obv_col = "obv" if "obv" in df.columns else None
+        close_col = "close" if "close" in df.columns else ("종가" if "종가" in df.columns else None)
+        if obv_col is not None and close_col is not None and len(df) >= 5:
+            close_5ago = _safe_float(df[close_col].iloc[-5])
+            close_now = _safe_float(df[close_col].iloc[-1])
+            obv_5ago = _safe_float(df[obv_col].iloc[-5])
+            obv_now = _safe_float(df[obv_col].iloc[-1])
+            if (close_5ago is not None and close_now is not None
+                    and obv_5ago is not None and obv_now is not None):
+                if close_now > close_5ago and obv_now < obv_5ago:
+                    score -= 1
+                    reasons.append("OBV 하락 다이버전스")
+
+    # 9. 저항선 근접 (종가가 resistance의 ±1% 이내이고 resistance 아래) : -1
+    resistance = _safe_float(row.get("resistance"))
+    if close is not None and resistance is not None and resistance > 0:
+        resist_diff_pct = abs(close - resistance) / resistance * 100
+        if resist_diff_pct <= 1.0 and close <= resistance:
+            score -= 1
+            reasons.append(f"저항선 근접(diff={resist_diff_pct:.2f}%)")
+
+    # 10. VWAP 하회 : -1
+    vwap = _safe_float(row.get("vwap"))
+    if close is not None and vwap is not None and close < vwap:
+        score -= 1
+        reasons.append("VWAP 하회")
 
     return score, reasons
 
@@ -317,12 +410,13 @@ def detect(
     row = _get_row(df, -1)
     prev_row = _get_row(df, -2)
 
-    rsi_val = _safe_float(row.get("rsi")) or float("nan")
-    vol_ratio = _compute_vol_ratio(df) or float("nan")
+    rsi_val = _safe_float(row.get("rsi"), default=float("nan"))
+    vol_ratio_raw = _compute_vol_ratio(df)
+    vol_ratio = vol_ratio_raw if vol_ratio_raw is not None else float("nan")
     macd_cross = _compute_macd_cross(row, prev_row)
 
     buy_score, buy_reasons = _buy_scores(row, prev_row, df)
-    sell_score, sell_reasons = _sell_scores(row, prev_row)
+    sell_score, sell_reasons = _sell_scores(row, prev_row, df)
 
     # 거래량 급감 매도 점수 (-1)
     _vol_ratio_val = _safe_float(vol_ratio)
@@ -395,12 +489,13 @@ def detect_daily(
     row = _get_row(df, -1)
     prev_row = _get_row(df, -2)
 
-    rsi_val = _safe_float(row.get("rsi")) or float("nan")
-    vol_ratio = _compute_vol_ratio(df) or float("nan")
+    rsi_val = _safe_float(row.get("rsi"), default=float("nan"))
+    vol_ratio_raw = _compute_vol_ratio(df)
+    vol_ratio = vol_ratio_raw if vol_ratio_raw is not None else float("nan")
     macd_cross = _compute_macd_cross(row, prev_row)
 
     buy_score, buy_reasons = _buy_scores(row, prev_row, df)
-    sell_score, sell_reasons = _sell_scores(row, prev_row)
+    sell_score, sell_reasons = _sell_scores(row, prev_row, df)
 
     # 거래량 급감 매도 점수 (-1)
     _vol_ratio_val = _safe_float(vol_ratio)

@@ -1,4 +1,4 @@
-"""기술적 분석 지표 계산 모듈 - RSI, MACD, 볼린저밴드, 이동평균 등 19개 지표."""
+"""기술적 분석 지표 계산 모듈 - RSI, MACD, 볼린저밴드, 이동평균, ADX, VWAP 등 26개 지표."""
 
 import logging
 
@@ -21,6 +21,10 @@ class TechnicalIndicators:
         result = self._add_atr(result)
         result = self._add_stochastic(result)
         result = self._add_obv(result)
+        result = self._add_adx(result)
+        result = self._add_vwap(result)
+        result = self._add_support_resistance(result)
+        result = self._add_pivot_points(result)
 
         added_cols = [c for c in result.columns if c not in df.columns]
         self.logger.info(f"모든 기술적 지표 계산 완료 (총 {len(added_cols)}개 컬럼)")
@@ -125,4 +129,91 @@ class TechnicalIndicators:
         direction = np.sign(result["close"].diff()).fillna(0)
         obv = (direction * result["volume"]).cumsum()
         result["obv"] = obv
+        return result
+
+    def _add_adx(self, df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
+        """ADX (Average Directional Index) 계산 — +DI, -DI, ADX 컬럼 추가."""
+        result = df.copy()
+        high = result["high"]
+        low = result["low"]
+        close = result["close"]
+
+        prev_high = high.shift(1)
+        prev_low = low.shift(1)
+        prev_close = close.shift(1)
+
+        # True Range
+        tr = pd.concat(
+            [
+                high - low,
+                (high - prev_close).abs(),
+                (low - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+
+        # +DM / -DM
+        up_move = high - prev_high
+        down_move = prev_low - low
+
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+
+        plus_dm = pd.Series(plus_dm, index=result.index)
+        minus_dm = pd.Series(minus_dm, index=result.index)
+
+        # Wilder smoothing (EWM alpha=1/period)
+        alpha = 1 / period
+        atr_smooth = tr.ewm(alpha=alpha, min_periods=period, adjust=False).mean()
+        plus_dm_smooth = plus_dm.ewm(alpha=alpha, min_periods=period, adjust=False).mean()
+        minus_dm_smooth = minus_dm.ewm(alpha=alpha, min_periods=period, adjust=False).mean()
+
+        # +DI / -DI
+        plus_di = np.where(atr_smooth == 0, 0.0, plus_dm_smooth / atr_smooth * 100)
+        minus_di = np.where(atr_smooth == 0, 0.0, minus_dm_smooth / atr_smooth * 100)
+
+        plus_di = pd.Series(plus_di, index=result.index)
+        minus_di = pd.Series(minus_di, index=result.index)
+
+        # DX → ADX
+        di_sum = plus_di + minus_di
+        dx = np.where(di_sum == 0, 0.0, (plus_di - minus_di).abs() / di_sum * 100)
+        dx = pd.Series(dx, index=result.index)
+
+        adx = dx.ewm(alpha=alpha, min_periods=period, adjust=False).mean()
+
+        result["plus_di"] = plus_di
+        result["minus_di"] = minus_di
+        result["adx"] = adx
+        return result
+
+    def _add_vwap(self, df: pd.DataFrame) -> pd.DataFrame:
+        """VWAP (Volume Weighted Average Price) 계산."""
+        result = df.copy()
+        typical_price = (result["high"] + result["low"] + result["close"]) / 3
+        cum_tp_vol = (typical_price * result["volume"]).cumsum()
+        cum_vol = result["volume"].cumsum()
+        result["vwap"] = np.where(cum_vol == 0, np.nan, cum_tp_vol / cum_vol)
+        return result
+
+    def _add_support_resistance(self, df: pd.DataFrame, period: int = 20) -> pd.DataFrame:
+        """최근 N봉 기준 지지선(support)·저항선(resistance) 계산."""
+        result = df.copy()
+        result["support"] = result["low"].rolling(window=period).min()
+        result["resistance"] = result["high"].rolling(window=period).max()
+        return result
+
+    def _add_pivot_points(self, df: pd.DataFrame) -> pd.DataFrame:
+        """피봇 포인트 — 전일 H/L/C 기반 PP, R1, S1, R2, S2 계산."""
+        result = df.copy()
+        prev_high = result["high"].shift(1)
+        prev_low = result["low"].shift(1)
+        prev_close = result["close"].shift(1)
+
+        pp = (prev_high + prev_low + prev_close) / 3
+        result["pivot_pp"] = pp
+        result["pivot_r1"] = 2 * pp - prev_low
+        result["pivot_s1"] = 2 * pp - prev_high
+        result["pivot_r2"] = pp + (prev_high - prev_low)
+        result["pivot_s2"] = pp - (prev_high - prev_low)
         return result

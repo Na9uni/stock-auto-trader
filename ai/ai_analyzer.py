@@ -69,7 +69,10 @@ class AIAnalyzer:
         if orderbook:
             orderbook_info = f"\n호가창: {json.dumps(orderbook, ensure_ascii=False)}"
 
-        prompt = f"""당신은 한국 주식 단타 트레이딩 AI입니다.
+        prompt = f"""당신은 한국 주식 단타 자동매매 AI입니다.
+이 신호는 이미 RSI, MACD, 볼린저밴드, 이동평균, 거래량 등 10개 기술적 조건에서 STRONG(6점 이상) 판정을 받았습니다.
+기술적 분석은 이미 완료되었으므로, 당신은 치명적 리스크가 있는 경우에만 [관망]을 판단하세요.
+
 종목: {name} ({ticker})
 현재가: {price:,}원 ({change_rate:+.1f}%)
 RSI: {rsi:.1f}
@@ -79,8 +82,12 @@ MACD: {macd_cross or '없음'}
 매수 신호 사유: {', '.join(signal_reasons)}
 경고: {', '.join(warnings or [])}{candle_info}{orderbook_info}
 
-위 신호를 보고 3줄 이내로 분석하고, 최종 판단을 내려주세요.
-반드시 첫 줄에 [매수], [관망], [매도] 중 하나를 표시하세요."""
+판단 기준:
+- [매수]: 신호가 유효하고 치명적 리스크 없음 (기본 판단)
+- [관망]: 급락 직후 반등 미확인, 거래량 극히 부족, 상한가 근접 등 명백한 위험 시에만
+- [매도]: 하락 추세 명확
+
+2줄 이내로 핵심만 분석하고, 반드시 첫 줄에 [매수], [관망], [매도] 중 하나를 표시하세요."""
 
         try:
             text = self._call_claude(prompt, max_tokens=300)
