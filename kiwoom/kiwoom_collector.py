@@ -648,10 +648,13 @@ class KiwoomAPI(QAxWidget):
         ticker = ticker.strip()
 
         if real_type == "주식체결":
-            price = abs(int(self._get_comm_real_data(ticker, 10) or "0"))
-            change_rate = float(self._get_comm_real_data(ticker, 12) or "0")
-            volume = abs(int(self._get_comm_real_data(ticker, 15) or "0"))
-            exec_strength = float(self._get_comm_real_data(ticker, 228) or "0")
+            try:
+                price = abs(int(self._get_comm_real_data(ticker, 10) or "0"))
+                change_rate = float(self._get_comm_real_data(ticker, 12) or "0")
+                volume = abs(int(self._get_comm_real_data(ticker, 15) or "0"))
+                exec_strength = float(self._get_comm_real_data(ticker, 228) or "0")
+            except (ValueError, TypeError):
+                return
 
             if self._real_data_callback is not None:
                 self._real_data_callback(ticker, {
@@ -664,15 +667,18 @@ class KiwoomAPI(QAxWidget):
 
         elif real_type == "주식호가잔량":
             orderbook: dict[str, list[dict[str, int]]] = {"ask": [], "bid": []}
-            for i in range(5):  # 호가 5단계
-                ask_price = abs(int(self._get_comm_real_data(ticker, 41 + i) or "0"))
-                bid_price = abs(int(self._get_comm_real_data(ticker, 51 + i) or "0"))
-                ask_qty = abs(int(self._get_comm_real_data(ticker, 61 + i) or "0"))
-                bid_qty = abs(int(self._get_comm_real_data(ticker, 71 + i) or "0"))
-                if ask_price > 0:
-                    orderbook["ask"].append({"price": ask_price, "qty": ask_qty})
-                if bid_price > 0:
-                    orderbook["bid"].append({"price": bid_price, "qty": bid_qty})
+            try:
+                for i in range(5):  # 호가 5단계
+                    ask_price = abs(int(self._get_comm_real_data(ticker, 41 + i) or "0"))
+                    bid_price = abs(int(self._get_comm_real_data(ticker, 51 + i) or "0"))
+                    ask_qty = abs(int(self._get_comm_real_data(ticker, 61 + i) or "0"))
+                    bid_qty = abs(int(self._get_comm_real_data(ticker, 71 + i) or "0"))
+                    if ask_price > 0:
+                        orderbook["ask"].append({"price": ask_price, "qty": ask_qty})
+                    if bid_price > 0:
+                        orderbook["bid"].append({"price": bid_price, "qty": bid_qty})
+            except (ValueError, TypeError):
+                return
 
             if self._real_data_callback is not None:
                 self._real_data_callback(ticker, {
