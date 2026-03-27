@@ -20,7 +20,7 @@ def get_current_price(ticker: str) -> int:
 def execute_buy(ticker, name, quantity, price=0, rule_name=""):
     """매수: 현재가 +0.3% 보호 지정가"""
     from trading.kiwoom_order_queue import KiwoomOrderQueue
-    from kiwoom.kiwoom_collector import align_tick_size
+    from utils.tick_size import align_tick_size
     if price > 0:
         limit_price = align_tick_size(int(price * 1.003), direction="up")
     else:
@@ -32,7 +32,7 @@ def execute_buy(ticker, name, quantity, price=0, rule_name=""):
 def execute_sell(ticker, name, quantity, price=0, rule_name=""):
     """매도: 현재가 -0.3% 보호 지정가"""
     from trading.kiwoom_order_queue import KiwoomOrderQueue
-    from kiwoom.kiwoom_collector import align_tick_size
+    from utils.tick_size import align_tick_size
     if price > 0:
         limit_price = align_tick_size(int(price * 0.997), direction="down")
     else:
