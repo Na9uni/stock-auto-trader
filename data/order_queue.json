@@ -1,1 +1,42 @@
-{"orders":[]}
+{
+  "orders": [
+    {
+      "id": "103b19f2",
+      "ticker": "229200",
+      "side": "buy",
+      "quantity": 4,
+      "price": 19835,
+      "order_type": 1,
+      "price_type": "03",
+      "rule_name": "자동매매_STRONG",
+      "status": "failed",
+      "mock_mode": false,
+      "created_at": "2026-03-27T14:00:17",
+      "submitted_at": "2026-03-27T14:09:22",
+      "executed_at": null,
+      "exec_price": 19885,
+      "order_number": "0509674",
+      "cumul_exec_qty": 3,
+      "fail_reason": "submitted 3분 타임아웃"
+    },
+    {
+      "id": "a583893e",
+      "ticker": "229200",
+      "side": "buy",
+      "quantity": 4,
+      "price": 19835,
+      "order_type": 1,
+      "price_type": "03",
+      "rule_name": "자동매매_STRONG",
+      "status": "failed",
+      "mock_mode": false,
+      "created_at": "2026-03-27T14:05:00",
+      "submitted_at": "2026-03-27T14:09:23",
+      "executed_at": null,
+      "exec_price": null,
+      "order_number": null,
+      "cumul_exec_qty": 0,
+      "fail_reason": "submitted 3분 타임아웃"
+    }
+  ]
+}

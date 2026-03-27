@@ -1,1 +1,26 @@
-{}
+{
+  "005930": {
+    "name": "삼성전자",
+    "qty": 3,
+    "buy_price": 183466,
+    "bought_at": "2026-03-27T00:00:00",
+    "high_price": 183466,
+    "trailing_activated": false
+  },
+  "078600": {
+    "name": "대주전자재료",
+    "qty": 3,
+    "buy_price": 126700,
+    "bought_at": "2026-03-27T00:00:00",
+    "high_price": 130700,
+    "trailing_activated": false
+  },
+  "229200": {
+    "name": "KODEX 코스닥150",
+    "qty": 3,
+    "buy_price": 19885,
+    "bought_at": "2026-03-27T00:00:00",
+    "high_price": 19885,
+    "trailing_activated": false
+  }
+}

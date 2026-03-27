@@ -256,6 +256,7 @@ class KiwoomAPI(QAxWidget):
             "opt10080_req": self._handle_opt10080,
             "opt10081_req": self._handle_opt10081,
             "opw00004_req": self._handle_opw00004,
+            "opw00018_req": self._handle_opw00018,
         }.get(rqname)
 
         if handler is not None:
@@ -398,6 +399,52 @@ class KiwoomAPI(QAxWidget):
             "est_deposit": est_deposit,
         }
 
+    # ----- opw00018: 계좌 보유종목 상세 -----
+
+    def request_opw00018(self) -> list[dict] | None:
+        """계좌평가잔고내역 — 보유종목 목록 조회."""
+        if self._account_disabled:
+            return None
+        if not self.account_number:
+            return None
+        self._set_input("계좌번호", self.account_number)
+        self._set_input("비밀번호", "")
+        self._set_input("비밀번호입력매체구분", "00")
+        self._set_input("조회구분", "1")
+        ret = self._comm_rq_data("opw00018_req", "opw00018", 0, "4018")
+        if ret != 0:
+            logger.error("opw00018 request failed (ret=%d)", ret)
+            return None
+        if not self._wait_tr(timeout_ms=8000):
+            return None
+        return self._tr_data.get("opw00018")
+
+    def _handle_opw00018(self, trcode: str, rqname: str) -> None:
+        count = self._get_repeat_cnt(trcode, rqname)
+        holdings: list[dict] = []
+        for i in range(count):
+            ticker = self._get_comm_data(trcode, rqname, i, "종목번호").strip().replace("A", "")
+            name = self._get_comm_data(trcode, rqname, i, "종목명").strip()
+            qty = _safe_int(self._get_comm_data(trcode, rqname, i, "보유수량"))
+            avg_price = _safe_int(self._get_comm_data(trcode, rqname, i, "매입가"))
+            current_price = _safe_int(self._get_comm_data(trcode, rqname, i, "현재가"))
+            eval_amt = _safe_int(self._get_comm_data(trcode, rqname, i, "평가금액"))
+            pnl_amt = _safe_int(self._get_comm_data(trcode, rqname, i, "평가손익"))
+            pnl_pct = float(self._get_comm_data(trcode, rqname, i, "수익률(%)").strip() or "0")
+            if ticker and qty > 0:
+                holdings.append({
+                    "ticker": ticker,
+                    "name": name,
+                    "qty": qty,
+                    "avg_price": abs(avg_price),
+                    "current_price": abs(current_price),
+                    "eval_amt": abs(eval_amt),
+                    "pnl_amt": pnl_amt,
+                    "pnl_pct": pnl_pct / 100.0 if abs(pnl_pct) > 1 else pnl_pct,
+                })
+        self._tr_data["opw00018"] = holdings
+        logger.info("opw00018: %d holdings", len(holdings))
+
     # ----- SendOrder -----
 
     def send_order(
@@ -422,8 +469,8 @@ class KiwoomAPI(QAxWidget):
         screen_no = "5001"
         ret = self.dynamicCall(
             "SendOrder(QString, QString, QString, int, QString, int, int, QString, QString)",
-            "order_req", screen_no, self.account_number,
-            order_type, ticker, quantity, price, price_type, "",
+            ["order_req", screen_no, self.account_number,
+             order_type, ticker, quantity, price, price_type, ""],
         )
         if ret == 0:
             logger.info(
@@ -715,13 +762,15 @@ class KiwoomCollector:
             prev["est_deposit"] = account["est_deposit"]
 
     def _sync_account_stocks(self) -> None:
-        """Sync auto_positions.json with current prices -> account.stocks list.
+        """opw00018 결과가 있으면 보존, 없으면 auto_positions로 폴백."""
+        # opw00018에서 가져온 실제 보유종목이 있으면 덮어쓰지 않음
+        existing = self._data["account"].get("stocks", [])
+        if existing and any(isinstance(s, dict) and s.get("ticker") for s in existing):
+            return
 
-        auto_positions.json format: {ticker: {name, qty, buy_price, ...}, ...}
-        """
+        # auto_positions.json 폴백
         positions = _read_json(AUTO_POSITIONS_PATH)
-        if positions is None or not isinstance(positions, dict):
-            self._data["account"]["stocks"] = []
+        if positions is None or not isinstance(positions, dict) or not positions:
             return
 
         account_stocks: list[dict[str, Any]] = []
@@ -776,12 +825,21 @@ class KiwoomCollector:
             self._update_stock_data(ticker, name, None, candles_1d=candles)
 
     def collect_account_balance(self) -> None:
-        """Collect account balance via opw00004."""
+        """Collect account balance via opw00004 + holdings via opw00018."""
         account = self.collect_account()
         if account is not None:
             self._update_account_data(account)
         else:
             logger.warning("Account query returned None")
+
+        # 보유종목 조회
+        time.sleep(0.7)
+        holdings = self.api.request_opw00018()
+        if holdings is not None:
+            self._data["account"]["stocks"] = holdings
+            logger.info("Account holdings: %d stocks", len(holdings))
+        else:
+            logger.debug("opw00018 returned None")
 
     # ----- Order queue processing -----
 
