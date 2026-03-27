@@ -287,7 +287,7 @@ class KiwoomAPI(QAxWidget):
         low = _safe_int(self._get_comm_data(trcode, rqname, 0, "저가"))
 
         self._tr_data["opt10001"] = {
-            "price": abs(price),
+            "current_price": abs(price),
             "change_rate": change_rate,
             "open": abs(open_price),
             "high": abs(high),
@@ -512,7 +512,12 @@ class KiwoomAPI(QAxWidget):
             _atomic_write_json(ORDER_QUEUE_PATH, data)
 
     def _apply_fill_event(self, orders: list[dict], fill: dict[str, Any]) -> bool:
-        """Apply a fill event to matching submitted/failed order. Returns True if applied."""
+        """Apply a fill event to matching submitted/failed order. Returns True if applied.
+
+        NOTE: 'failed' status is intentionally included in matching because the 3-min
+        timeout may mark orders as failed before the actual chejan fill event arrives.
+        This allows late fills to be correctly applied to timed-out orders.
+        """
         for order in orders:
             if (
                 order.get("status") in ("submitted", "failed")
@@ -686,7 +691,7 @@ class KiwoomCollector:
             "updated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
         }
         if basic is not None:
-            updated["price"] = basic["price"]
+            updated["current_price"] = basic["current_price"]
             updated["change_rate"] = basic["change_rate"]
             updated["open"] = basic["open"]
             updated["high"] = basic["high"]
@@ -710,20 +715,23 @@ class KiwoomCollector:
             prev["est_deposit"] = account["est_deposit"]
 
     def _sync_account_stocks(self) -> None:
-        """Sync auto_positions.json with current prices -> account.stocks list."""
+        """Sync auto_positions.json with current prices -> account.stocks list.
+
+        auto_positions.json format: {ticker: {name, qty, buy_price, ...}, ...}
+        """
         positions = _read_json(AUTO_POSITIONS_PATH)
-        if positions is None:
+        if positions is None or not isinstance(positions, dict):
             self._data["account"]["stocks"] = []
             return
 
-        pos_list = positions if isinstance(positions, list) else positions.get("positions", [])
         account_stocks: list[dict[str, Any]] = []
-        for pos in pos_list:
-            ticker = pos.get("ticker", "")
+        for ticker, pos in positions.items():
+            if not isinstance(pos, dict):
+                continue
             stock_data = self._data["stocks"].get(ticker, {})
-            current_price = stock_data.get("price", 0)
+            current_price = stock_data.get("current_price", 0)
             buy_price = pos.get("avg_price", pos.get("buy_price", 0))
-            quantity = pos.get("quantity", 0)
+            quantity = pos.get("qty", pos.get("quantity", 0))
             eval_amount = current_price * quantity if current_price > 0 else 0
             profit_rate = (
                 ((current_price - buy_price) / buy_price * 100)

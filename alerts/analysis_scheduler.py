@@ -20,6 +20,7 @@ import yfinance as yf
 from dotenv import load_dotenv
 
 from alerts.signal_detector import SignalType, SignalStrength, SignalResult
+from alerts.telegram_notifier import TelegramNotifier
 from analysis.indicators import TechnicalIndicators
 
 # ---------------------------------------------------------------------------
@@ -665,7 +666,7 @@ def build_signal_header(
 
     # 현재가
     current_price = stock.get("current_price", 0)
-    change_pct = stock.get("change_pct", 0.0)
+    change_pct = float(stock.get("change_rate", 0.0))
     change_sign = "+" if change_pct >= 0 else ""
 
     header_lines = [
@@ -769,6 +770,9 @@ def _calc_trade_amount() -> int:
         if balance <= 0 and not MOCK_MODE:
             logger.info("[시드머니] 예수금 0 → 매수 불가")
             return 0
+        if balance <= 0 and MOCK_MODE:
+            # MOCK 모드에서 예수금 0이면 AUTO_TRADE_AMOUNT 사용
+            return AUTO_TRADE_AMOUNT
         holding_count = len(load_auto_positions()) + len(_buy_in_progress)
         free_slots = MAX_SLOTS - holding_count
         if free_slots <= 0:
@@ -815,6 +819,7 @@ def _cleanup_failed_positions(positions: dict) -> dict:
         del positions[t]
 
     # 매도 실패 → selling 플래그 해제 (sell_order_id 매칭)
+    _changed = bool(to_delete)
     failed_sell_orders = [
         o for o in orders
         if o.get("status") == "failed" and o.get("side") == "sell"
@@ -836,12 +841,13 @@ def _cleanup_failed_positions(positions: dict) -> dict:
         pos["selling"] = False
         pos.pop("sell_order_id", None)
         _sell_fail_count[ticker] = _sell_fail_count.get(ticker, 0) + 1
+        _changed = True
         logger.warning(
             "[포지션 정리] %s 매도 실패 → selling 플래그 해제, 손절 재시도 가능",
             pos.get("name", ticker),
         )
 
-    if to_delete or any(not p.get("selling") for p in positions.values()):
+    if _changed:
         save_auto_positions(positions)
 
     return positions

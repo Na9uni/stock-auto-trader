@@ -32,7 +32,7 @@ _DATA_DIR = ROOT / "data"
 _KIWOOM_DATA = _DATA_DIR / "kiwoom_data.json"
 _POSITIONS_DATA = _DATA_DIR / "auto_positions.json"
 _ORDER_QUEUE = _DATA_DIR / "order_queue.json"
-_INTEREST_DATA = _DATA_DIR / "interest_stocks.json"
+_INTEREST_DATA = _DATA_DIR / "interest_list.json"
 
 CMD_FOOTER = "\n\n💡 /도움말 — 명령어 목록"
 
@@ -280,7 +280,7 @@ def _handle_buy(chat_id: str, ticker: str, qty_str: str) -> None:
 
     qty = int(qty_str)
     order = {
-        "action": "buy",
+        "side": "buy",
         "ticker": ticker,
         "qty": qty,
         "source": "telegram_manual",
@@ -302,7 +302,7 @@ def _handle_sell(chat_id: str, ticker: str, qty_str: str) -> None:
 
     qty = int(qty_str)
     order = {
-        "action": "sell",
+        "side": "sell",
         "ticker": ticker,
         "qty": qty,
         "source": "telegram_manual",
@@ -495,10 +495,17 @@ def _enqueue_order(order: dict) -> bool:
         # KiwoomOrderQueue가 실행 중이면 order_queue.json을 통해 IPC
         queue = _read_json(_ORDER_QUEUE)
         if queue is None:
-            queue = {"pending": []}
+            queue = {"orders": []}
 
-        pending: list = queue.get("pending", [])
-        updated_queue = {**queue, "pending": [*pending, order]}
+        orders: list = queue.get("orders", [])
+        # kiwoom_collector 호환 필드 추가
+        enriched_order = {
+            **order,
+            "status": "pending",
+            "quantity": order.get("qty", 0),
+            "order_type": 1 if order.get("side") == "buy" else 2,
+        }
+        updated_queue = {**queue, "orders": [*orders, enriched_order]}
         return _write_json(_ORDER_QUEUE, updated_queue)
     except Exception as exc:
         logger.error("_enqueue_order 예외: %s", exc)

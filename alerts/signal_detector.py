@@ -64,7 +64,7 @@ def _safe_float(value) -> float | None:
 
 def _get_row(df: pd.DataFrame, iloc: int) -> dict:
     """iloc 인덱스의 행을 dict로 반환. 존재하지 않으면 빈 dict."""
-    if len(df) <= abs(iloc) if iloc < 0 else len(df) <= iloc:
+    if (len(df) <= abs(iloc)) if iloc < 0 else (len(df) <= iloc):
         return {}
     return df.iloc[iloc].to_dict()
 
