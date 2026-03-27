@@ -176,10 +176,14 @@ class KiwoomAPI(QAxWidget):
         self._account_fail_count: int = 0
         self._account_disabled: bool = False
 
+        # Real-data callback (set by KiwoomCollector)
+        self._real_data_callback = None
+
         # Connect event handlers
         self.OnEventConnect.connect(self._on_event_connect)
         self.OnReceiveTrData.connect(self._on_receive_tr_data)
         self.OnReceiveChejanData.connect(self._on_receive_chejan_data)
+        self.OnReceiveRealData.connect(self._on_receive_real_data)
 
         self._event_loop: QEventLoop | None = None
 
@@ -635,6 +639,52 @@ class KiwoomAPI(QAxWidget):
             data["orders"] = orders
             _atomic_write_json(ORDER_QUEUE_PATH, data)
 
+    # ----- OnReceiveRealData -----
+
+    def _on_receive_real_data(
+        self, ticker: str, real_type: str, real_data: str
+    ) -> None:
+        """실시간 체결/호가 이벤트 수신."""
+        ticker = ticker.strip()
+
+        if real_type == "주식체결":
+            price = abs(int(self._get_comm_real_data(ticker, 10) or "0"))
+            change_rate = float(self._get_comm_real_data(ticker, 12) or "0")
+            volume = abs(int(self._get_comm_real_data(ticker, 15) or "0"))
+            exec_strength = float(self._get_comm_real_data(ticker, 228) or "0")
+
+            if self._real_data_callback is not None:
+                self._real_data_callback(ticker, {
+                    "current_price": price,
+                    "change_rate": change_rate,
+                    "volume": volume,
+                    "exec_strength": exec_strength,
+                    "real_type": "trade",
+                })
+
+        elif real_type == "주식호가잔량":
+            orderbook: dict[str, list[dict[str, int]]] = {"ask": [], "bid": []}
+            for i in range(5):  # 호가 5단계
+                ask_price = abs(int(self._get_comm_real_data(ticker, 41 + i) or "0"))
+                bid_price = abs(int(self._get_comm_real_data(ticker, 51 + i) or "0"))
+                ask_qty = abs(int(self._get_comm_real_data(ticker, 61 + i) or "0"))
+                bid_qty = abs(int(self._get_comm_real_data(ticker, 71 + i) or "0"))
+                if ask_price > 0:
+                    orderbook["ask"].append({"price": ask_price, "qty": ask_qty})
+                if bid_price > 0:
+                    orderbook["bid"].append({"price": bid_price, "qty": bid_qty})
+
+            if self._real_data_callback is not None:
+                self._real_data_callback(ticker, {
+                    "orderbook": orderbook,
+                    "real_type": "orderbook",
+                })
+
+    def _get_comm_real_data(self, ticker: str, fid: int) -> str:
+        """GetCommRealData wrapper — returns stripped string."""
+        raw = self.dynamicCall("GetCommRealData(QString, int)", [ticker, fid])
+        return raw.strip() if raw else ""
+
 
 # ---------------------------------------------------------------------------
 # KiwoomCollector
@@ -661,6 +711,9 @@ class KiwoomCollector:
             },
             "updated_at": "",
         }
+
+        # Connect real-data callback
+        self.api._real_data_callback = self._on_real_data
 
         # Restore previous account data if available
         self._restore_previous_data()
@@ -961,6 +1014,53 @@ class KiwoomCollector:
             data["orders"] = orders
             _atomic_write_json(ORDER_QUEUE_PATH, data)
 
+    # ----- Real-time registration -----
+
+    def register_real_data(self) -> None:
+        """감시종목 실시간 체결+호가 등록 (SetRealReg)."""
+        tickers = list(self._tickers.keys())
+        if not tickers:
+            logger.warning("register_real_data: 감시종목 없음, 실시간 등록 건너뜀")
+            return
+        ticker_str = ";".join(tickers)
+        # FID 목록: 10=현재가, 11=전일대비, 12=등락율, 13=누적거래량,
+        #           15=거래량, 228=체결강도, 41=매도호가1, 51=매수호가1,
+        #           61=매도잔량1, 71=매수잔량1, 42~45=매도호가2~5, 52~55=매수호가2~5,
+        #           62~65=매도잔량2~5, 72~75=매수잔량2~5
+        fid_list = (
+            "10;11;12;13;15;228;"
+            "41;51;61;71;"
+            "42;52;62;72;"
+            "43;53;63;73;"
+            "44;54;64;74;"
+            "45;55;65;75"
+        )
+        self.api.dynamicCall(
+            "SetRealReg(QString, QString, QString, QString)",
+            ["9001", ticker_str, fid_list, "0"],
+        )
+        logger.info("실시간 등록 완료: %d종목", len(tickers))
+
+    # ----- Real-time data callback -----
+
+    def _on_real_data(self, ticker: str, data: dict) -> None:
+        """실시간 데이터 콜백 — _data['stocks']에 즉시 반영."""
+        if ticker not in self._data["stocks"]:
+            return
+
+        stock = self._data["stocks"][ticker]
+
+        if data.get("real_type") == "trade":
+            if data.get("current_price", 0) > 0:
+                stock["current_price"] = data["current_price"]
+            if data.get("change_rate") is not None:
+                stock["change_rate"] = data["change_rate"]
+            if data.get("exec_strength", 0) > 0:
+                stock["exec_strength"] = data["exec_strength"]
+
+        elif data.get("real_type") == "orderbook":
+            stock["orderbook"] = data.get("orderbook", {})
+
     # ----- Save -----
 
     def save(self) -> None:
@@ -1052,6 +1152,9 @@ def main() -> None:
 
     # First tick immediately
     _tick()
+
+    # 첫 tick 완료 후 실시간 감시 등록 (_tickers가 채워진 상태)
+    collector.register_real_data()
 
     # Timer for subsequent ticks
     timer = QTimer()

@@ -188,11 +188,25 @@ class TechnicalIndicators:
         return result
 
     def _add_vwap(self, df: pd.DataFrame) -> pd.DataFrame:
-        """VWAP (Volume Weighted Average Price) 계산."""
+        """VWAP (Volume Weighted Average Price) 계산 — 일별 리셋."""
         result = df.copy()
         typical_price = (result["high"] + result["low"] + result["close"]) / 3
-        cum_tp_vol = (typical_price * result["volume"]).cumsum()
-        cum_vol = result["volume"].cumsum()
+        tp_vol = typical_price * result["volume"]
+
+        # datetime 컬럼이 있으면 일별 그룹으로 VWAP 리셋
+        if "datetime" in result.columns:
+            try:
+                dates = pd.to_datetime(result["datetime"].astype(str).str[:8])
+                groups = dates.ne(dates.shift()).cumsum()
+                cum_tp_vol = tp_vol.groupby(groups).cumsum()
+                cum_vol = result["volume"].groupby(groups).cumsum()
+            except Exception:
+                cum_tp_vol = tp_vol.cumsum()
+                cum_vol = result["volume"].cumsum()
+        else:
+            cum_tp_vol = tp_vol.cumsum()
+            cum_vol = result["volume"].cumsum()
+
         result["vwap"] = np.where(cum_vol == 0, np.nan, cum_tp_vol / cum_vol)
         return result
 
