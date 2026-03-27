@@ -570,15 +570,6 @@ def is_daily_loss_exceeded() -> bool:
     today_str = date.today().isoformat()
     daily_loss = 0
 
-    # auto_positions에서 매수가 참조 (손익 계산용)
-    buy_prices: dict[str, int] = {}
-    try:
-        positions = load_auto_positions()
-        for t, p in positions.items():
-            buy_prices[t] = int(p.get("buy_price", 0))
-    except Exception:
-        pass
-
     for order in orders:
         if not isinstance(order, dict):
             continue
@@ -592,7 +583,7 @@ def is_daily_loss_exceeded() -> bool:
             continue
         # 손익 계산: (매도 체결가 - 매수가) * 수량
         sell_price = int(order.get("exec_price") or 0)
-        buy_price = buy_prices.get(order.get("ticker", ""), 0)
+        buy_price = int(order.get("buy_price", 0))
         qty = int(order.get("quantity", 0))
         if sell_price > 0 and buy_price > 0 and qty > 0:
             pnl = (sell_price - buy_price) * qty
@@ -1128,9 +1119,13 @@ def check_auto_positions() -> None:
         # 4) 시간 기반 청산: 2시간 보유 + 수익 0.5% 미만
         else:
             bought_at = pos.get("bought_at", "")
-            if bought_at and pct < 0.5 and not stale_data:
+            if not bought_at:
+                bought_at = datetime.now().isoformat()
+                positions[ticker]["bought_at"] = bought_at
+                changed = True
+            if pct < 0.5 and not stale_data:
                 try:
-                    bought_dt = datetime.strptime(bought_at, "%Y-%m-%dT%H:%M:%S")
+                    bought_dt = datetime.fromisoformat(bought_at)
                     hold_minutes = (datetime.now() - bought_dt).total_seconds() / 60
                     if hold_minutes >= 120:
                         reason = f"시간청산 ({hold_minutes:.0f}분 보유, {pct:+.1f}%)"
@@ -1141,9 +1136,18 @@ def check_auto_positions() -> None:
             else:
                 continue
 
-        # 매도 실행
-        pnl = (current_price - buy_price) * qty
-        sell_res = execute_sell(ticker, name, qty, current_price,
+        # 매도 실행 — 분할 익절 수량 차감
+        partial_sell_qty = pos.get("partial_sell_qty", 0)
+        if partial_sell_qty > 0:
+            adjusted_qty = qty - partial_sell_qty
+            if adjusted_qty <= 0:
+                logger.info("[자동청산] %s 분할 익절이 전량 커버 → 매도 스킵", name)
+                continue
+            sell_qty = adjusted_qty
+        else:
+            sell_qty = qty
+        pnl = (current_price - buy_price) * sell_qty
+        sell_res = execute_sell(ticker, name, sell_qty, current_price,
                                 rule_name=f"자동청산_{reason[:10]}")
         if sell_res.get("status") == "pending":
             positions[ticker]["selling"] = True
@@ -1633,6 +1637,21 @@ def check_order_status() -> None:
                             record_loss_and_stoploss(abs(_pnl))
                         else:
                             reset_consec_stoploss()
+                    # order에 buy_price 기록 (일일 손실 집계용)
+                    order["buy_price"] = _bp
+                    try:
+                        with open(ORDER_QUEUE_PATH, "r", encoding="utf-8") as f:
+                            _oq = json.load(f)
+                        for _o in _oq.get("orders", []):
+                            if _o.get("id") == order_id:
+                                _o["buy_price"] = _bp
+                                break
+                        _oq_tmp = Path(ORDER_QUEUE_PATH).with_suffix(".tmp")
+                        with open(_oq_tmp, "w", encoding="utf-8") as f:
+                            json.dump(_oq, f, ensure_ascii=False, indent=2)
+                        _oq_tmp.replace(ORDER_QUEUE_PATH)
+                    except Exception as e:
+                        logger.error("[buy_price 기록] order_queue 저장 실패: %s", e)
                     del positions[ticker]
                     _sell_fail_count.pop(ticker, None)
                     save_auto_positions(positions)
