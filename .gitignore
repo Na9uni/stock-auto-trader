@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+data/kiwoom_data.json
+data/kiwoom_data.tmp
+data/order_queue.tmp
+data/auto_positions.tmp
+logs/
+*.log
+.vscode/
