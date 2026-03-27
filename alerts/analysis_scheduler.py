@@ -1670,6 +1670,27 @@ def run_scheduler() -> None:
     )
     logger.info("=" * 50)
 
+    # 시작 알림 (텔레그램)
+    try:
+        positions = load_auto_positions()
+        holding = len(positions)
+        notifier = TelegramNotifier()
+        notifier.send_to_users(
+            [get_admin_id()],
+            f"✅ 시스템 시작 완료\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"  운영 모드: {OPERATION_MODE}\n"
+            f"  자동매매: {'ON' if AUTO_TRADE_ENABLED else 'OFF'}\n"
+            f"  보유 종목: {holding}개 / {MAX_SLOTS}슬롯\n"
+            f"  손절: {STOPLOSS_PCT}% | 트레일링: {TRAILING_ACTIVATE_PCT}%→{TRAILING_STOP_PCT}%\n"
+            f"  월간손실한도: {MAX_MONTHLY_LOSS:,}원\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━"
+            + CMD_FOOTER,
+        )
+        logger.info("시작 알림 전송 완료")
+    except Exception as e:
+        logger.error("시작 알림 실패: %s", e)
+
     schedule.every(1).minutes.do(check_signals)
     schedule.every(30).minutes.do(check_daily_signals)
     schedule.every(1).minutes.do(check_targets)

@@ -1,23 +1,20 @@
 @echo off
+chcp 65001 >nul 2>&1
 echo ============================================
-echo   주식 자동매매 시스템 전체 시작
+echo   Stock Auto-Trading System Start
 echo ============================================
 echo.
-echo [1/3] 키움 수집기 (32-bit) 시작...
-start "키움 수집기" cmd /k "%~dp0run_collector.bat"
+echo [1/2] Kiwoom Collector (32-bit)...
+start "Collector" cmd /k "cd /d %~dp0 && py -3.11-32 -m kiwoom.kiwoom_collector"
 timeout /t 5 /nobreak >nul
 
-echo [2/3] 스케줄러 + 텔레그램 (64-bit) 시작...
-start "스케줄러" cmd /k "%~dp0run_scheduler.bat"
-timeout /t 3 /nobreak >nul
-
-echo [3/3] 대시보드 시작...
-start "대시보드" cmd /k "%~dp0run_dashboard.bat"
+echo [2/2] Scheduler + Telegram (64-bit)...
+start "Scheduler" cmd /k "cd /d %~dp0 && python -c "from alerts.analysis_scheduler import run_scheduler; from alerts.telegram_commander import start_telegram_commander; start_telegram_commander(); run_scheduler()""
 
 echo.
-echo 전체 시스템 시작 완료!
-echo   - 키움 수집기: 별도 창
-echo   - 스케줄러: 별도 창
-echo   - 대시보드: http://localhost:8501
+echo System started!
+echo   - Collector: separate window
+echo   - Scheduler: separate window
+echo   - Dashboard: run_dashboard.bat (manual)
 echo.
 pause
