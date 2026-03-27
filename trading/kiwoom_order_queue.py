@@ -59,13 +59,18 @@ class KiwoomOrderQueue:
         order_id = str(uuid.uuid4())[:8]
         now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
+        # kiwoom_collector 호환: order_type=int(1=buy,2=sell), price_type=str("00"=지정가,"03"=시장가)
+        kiwoom_order_type = 1 if side == "buy" else 2
+        price_type = "03" if order_type == "market" else "00"
+
         order = {
             "id": order_id,
             "ticker": ticker,
             "side": side,
             "quantity": quantity,
             "price": price,
-            "order_type": order_type,
+            "order_type": kiwoom_order_type,
+            "price_type": price_type,
             "rule_name": rule_name,
             "status": "pending",
             "mock_mode": self.mock_mode,
