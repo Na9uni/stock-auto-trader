@@ -508,6 +508,7 @@ def _enqueue_order(order: dict) -> bool:
             "quantity": order.get("qty", 0),
             "price": 0,
             "order_type": 1 if order.get("side") == "buy" else 2,
+            "price_type": "03",
             "rule_name": "텔레그램_수동",
             "mock_mode": False,
             "created_at": _dt.now().strftime("%Y-%m-%dT%H:%M:%S"),
