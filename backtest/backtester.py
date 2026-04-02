@@ -22,6 +22,8 @@ class Backtester:
         commission_rate: float = 0.00015,  # 편도 0.015%
         tax_rate: float = 0.0018,          # 매도 세금 0.18%
         max_slots: int = 3,
+        strong_threshold: int = 4,  # STRONG 판정 최소 점수
+        use_daily: bool = True,     # True: detect_daily, False: detect
     ):
         self.initial_capital = initial_capital
         self.capital = initial_capital
@@ -31,6 +33,8 @@ class Backtester:
         self.commission_rate = commission_rate
         self.tax_rate = tax_rate
         self.max_slots = max_slots
+        self.strong_threshold = strong_threshold
+        self.use_daily = use_daily
 
         self.positions = {}  # {ticker: {qty, buy_price, high_price, trailing_activated}}
         self.trades = []     # [{ticker, side, price, qty, pnl, date, reason}]
@@ -56,20 +60,25 @@ class Backtester:
             # 1) 보유 포지션 손절/트레일링 체크
             self._check_positions(ticker, current_price, current_date)
 
-            # 2) 신호 감지
-            signal = detect(lookback)
+            # 2) 신호 감지 (일봉 or 5분봉)
+            if self.use_daily:
+                signal = detect_daily(lookback)
+            else:
+                signal = detect(lookback)
 
-            # 3) 매수 판단
+            # 3) 매수 판단 (strong_threshold 기반)
+            is_strong = abs(signal.score) >= self.strong_threshold
             if (signal.signal_type == SignalType.BUY
-                    and signal.strength == SignalStrength.STRONG
+                    and is_strong
                     and ticker not in self.positions
                     and len(self.positions) < self.max_slots):
                 self._buy(ticker, current_price, current_date, signal.reasons)
 
             # 4) 신호 기반 매도
             elif (signal.signal_type == SignalType.SELL
+                    and abs(signal.score) >= 3
                     and ticker in self.positions):
-                self._sell(ticker, current_price, current_date, "신호매도")
+                self._sell(ticker, current_price, current_date, f"신호매도(score={signal.score})")
 
             # 5) 에쿼티 기록
             equity = self.capital
