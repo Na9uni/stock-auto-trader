@@ -479,7 +479,7 @@ def detect(
             buy_score = 0
             total_score = min(total_score, 0)
 
-    signal_type, strength = _determine_strength(total_score, strong_threshold=6)
+    signal_type, strength = _determine_strength(total_score, strong_threshold=8)
 
     return SignalResult(
         signal_type=signal_type,
@@ -502,7 +502,7 @@ def detect_daily(
     일봉 기반 스윙 신호 감지.
 
     detect()와 같은 로직이나 다음이 다름:
-    - STRONG 기준: |score| >= 5
+    - STRONG 기준: |score| >= 7
     - 3중 정배열 시 +2 (단타는 +1)
     - MA20 상승 기울기 > 2% 이면 +1 추가
     - 가격↓ + 거래량↓ 다이버전스(매도 소진) +1
@@ -602,8 +602,8 @@ def detect_daily(
             buy_score = 0
             total_score = min(total_score, 0)
 
-    # 일봉 STRONG 기준: |score| >= 5
-    signal_type, strength = _determine_strength(total_score, strong_threshold=5)
+    # 일봉 STRONG 기준: |score| >= 7
+    signal_type, strength = _determine_strength(total_score, strong_threshold=7)
 
     return SignalResult(
         signal_type=signal_type,

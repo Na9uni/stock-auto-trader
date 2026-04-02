@@ -1,10 +1,35 @@
 {
-  "229200": {
-    "name": "KODEX 코스닥150",
+  "003280": {
+    "name": "흥아해운",
+    "qty": 14,
+    "buy_price": 0,
+    "bought_at": "2026-04-01T00:00:00",
+    "high_price": 0,
+    "trailing_activated": false,
+    "selling": false,
+    "sell_order_id": "",
+    "manual": true
+  },
+  "005930": {
+    "name": "삼성전자",
     "qty": 3,
-    "buy_price": 19885,
-    "bought_at": "2026-03-27T00:00:00",
-    "high_price": 19885,
-    "trailing_activated": false
+    "buy_price": 0,
+    "bought_at": "2026-04-01T00:00:00",
+    "high_price": 0,
+    "trailing_activated": false,
+    "selling": false,
+    "sell_order_id": "",
+    "manual": true
+  },
+  "014790": {
+    "name": "HL D&I",
+    "qty": 18,
+    "buy_price": 0,
+    "bought_at": "2026-04-01T00:00:00",
+    "high_price": 0,
+    "trailing_activated": false,
+    "selling": false,
+    "sell_order_id": "",
+    "manual": true
   }
 }

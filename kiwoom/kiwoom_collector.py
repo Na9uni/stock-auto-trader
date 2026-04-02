@@ -520,10 +520,14 @@ class KiwoomAPI(QAxWidget):
         cumul_qty = _safe_int(self._get_chejan_data(911))
         exec_price = _safe_int(self._get_chejan_data(910))
         order_status = self._get_chejan_data(913)  # 접수, 체결, ...
+        # FID 907: 매도수구분 (1=매도, 2=매수)
+        raw_side = self._get_chejan_data(907).strip()
+        side = "sell" if raw_side == "1" else "buy" if raw_side == "2" else ""
 
         fill_event: dict[str, Any] = {
             "order_no": order_no,
             "ticker": ticker,
+            "side": side,
             "cumul_qty": cumul_qty,
             "exec_price": abs(exec_price),
             "order_status": order_status,
@@ -531,8 +535,8 @@ class KiwoomAPI(QAxWidget):
         }
 
         logger.info(
-            "Chejan FILL: order_no=%s ticker=%s cumul=%d price=%d status=%s",
-            order_no, ticker, cumul_qty, abs(exec_price), order_status,
+            "Chejan FILL: order_no=%s ticker=%s side=%s cumul=%d price=%d status=%s",
+            order_no, ticker, side, cumul_qty, abs(exec_price), order_status,
         )
 
         if self._queue_processing:
@@ -576,27 +580,57 @@ class KiwoomAPI(QAxWidget):
     def _apply_fill_event(self, orders: list[dict], fill: dict[str, Any]) -> bool:
         """Apply a fill event to matching submitted/failed order. Returns True if applied.
 
+        Matching priority:
+        1) order_number가 일치하는 submitted/failed 주문
+        2) order_number가 없고 ticker+side가 일치하는 submitted/failed 주문
+           (3분 타임아웃으로 order_number가 기록되지 않은 경우)
+
         NOTE: 'failed' status is intentionally included in matching because the 3-min
         timeout may mark orders as failed before the actual chejan fill event arrives.
         This allows late fills to be correctly applied to timed-out orders.
         """
+        fill_side = fill.get("side", "")
+
+        # Pass 1: order_number 일치 우선
         for order in orders:
             if (
                 order.get("status") in ("submitted", "failed")
                 and order.get("ticker") == fill["ticker"]
-                and (
-                    not order.get("order_number")
-                    or order.get("order_number") == fill["order_no"]
-                )
+                and order.get("order_number")
+                and order.get("order_number") == fill["order_no"]
             ):
-                order["order_number"] = fill["order_no"]
-                order["cumul_exec_qty"] = fill["cumul_qty"]
-                order["exec_price"] = fill["exec_price"]
-                if fill["cumul_qty"] >= order.get("quantity", 0):
-                    order["status"] = "executed"
-                    order["executed_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-                return True
+                return self._apply_fill_to_order(order, fill)
+
+        # Pass 2: order_number 없는 주문 → ticker+side로 매칭
+        for order in orders:
+            if (
+                order.get("status") in ("submitted", "failed")
+                and order.get("ticker") == fill["ticker"]
+                and not order.get("order_number")
+            ):
+                # side 정보가 있으면 일치해야 함
+                if fill_side and order.get("side") and order["side"] != fill_side:
+                    continue
+                return self._apply_fill_to_order(order, fill)
+
         return False
+
+    def _apply_fill_to_order(self, order: dict, fill: dict[str, Any]) -> bool:
+        """Apply fill data to a single order and update its status."""
+        was_failed = order.get("status") == "failed"
+        order["order_number"] = fill["order_no"]
+        order["cumul_exec_qty"] = fill["cumul_qty"]
+        order["exec_price"] = fill["exec_price"]
+        if fill["cumul_qty"] >= order.get("quantity", 0):
+            order["status"] = "executed"
+            order["executed_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+            if was_failed:
+                order["fail_reason"] = None
+                logger.info(
+                    "Late fill recovered: %s %s (was failed/timeout → executed)",
+                    order.get("ticker"), order.get("side"),
+                )
+        return True
 
     def _fail_submitted_order(self, fail: dict[str, Any]) -> None:
         """Mark submitted order for ticker as failed."""

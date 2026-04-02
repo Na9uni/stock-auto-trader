@@ -1,1 +1,8 @@
-{"month":"2026-03","loss":0,"consec_stoploss":0,"weekly_loss":0}
+{
+  "month": "2026-04",
+  "loss": 1270,
+  "consec_stoploss": 2,
+  "weekly_loss": {
+    "2026-W13": 1270
+  }
+}

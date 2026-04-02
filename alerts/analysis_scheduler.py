@@ -792,7 +792,10 @@ def _calc_trade_amount() -> int:
         if balance <= 0 and MOCK_MODE:
             # MOCK 모드에서 예수금 0이면 AUTO_TRADE_AMOUNT 사용
             return AUTO_TRADE_AMOUNT
-        holding_count = len(load_auto_positions()) + len(_buy_in_progress)
+        # manual 포지션은 슬롯에서 제외
+        all_pos = load_auto_positions()
+        auto_count = sum(1 for p in all_pos.values() if not p.get("manual", False))
+        holding_count = auto_count + len(_buy_in_progress)
         free_slots = MAX_SLOTS - holding_count
         if free_slots <= 0:
             logger.info("[시드머니] 슬롯 꽉참 (%d/%d)", holding_count, MAX_SLOTS)
@@ -932,14 +935,13 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
             logger.warning("[자동매매] 일일 손실 한도 초과 → 매수 차단")
             return
 
-        # 중복 체크
+        # 중복 체크 (manual 포지션은 자동매매 대상 아님)
         positions = load_auto_positions()
-        if ticker in positions or ticker in _buy_in_progress:
-            # 이미 보유 or 매수 진행 중 → 중복 방지
-            # 보유 중인데 selling 실패로 돌아온 경우: selling/sell_order_id 복원
-            if ticker in positions and positions[ticker].get("selling"):
+        auto_positions = {k: v for k, v in positions.items() if not v.get("manual", False)}
+        if ticker in auto_positions or ticker in _buy_in_progress:
+            if ticker in auto_positions and auto_positions[ticker].get("selling"):
                 return
-            if ticker in positions:
+            if ticker in auto_positions:
                 return
             if ticker in _buy_in_progress:
                 return
@@ -1035,6 +1037,8 @@ def check_auto_positions() -> None:
     ts_pct = TRAILING_STOP_PCT
 
     for ticker, pos in list(positions.items()):
+        if pos.get("manual", False):
+            continue
         if pos.get("selling"):
             continue
 
@@ -1116,25 +1120,8 @@ def check_auto_positions() -> None:
         elif trailing_activated and drop_from_high >= ts_pct:
             reason = f"트레일링 스탑 (최고 {high_price:,}원 → {current_price:,}원, -{drop_from_high:.1f}%)"
 
-        # 4) 시간 기반 청산: 2시간 보유 + 수익 0.5% 미만
         else:
-            bought_at = pos.get("bought_at", "")
-            if not bought_at:
-                bought_at = datetime.now().isoformat()
-                positions[ticker]["bought_at"] = bought_at
-                changed = True
-            if pct < 0.5 and not stale_data:
-                try:
-                    bought_dt = datetime.fromisoformat(bought_at)
-                    hold_minutes = (datetime.now() - bought_dt).total_seconds() / 60
-                    if hold_minutes >= 120:
-                        reason = f"시간청산 ({hold_minutes:.0f}분 보유, {pct:+.1f}%)"
-                    else:
-                        continue
-                except Exception:
-                    continue
-            else:
-                continue
+            continue
 
         # 매도 실행 — 분할 익절 수량 차감
         partial_sell_qty = pos.get("partial_sell_qty", 0)
@@ -1331,10 +1318,30 @@ def check_daily_signals() -> None:
                         "[스윙 승격] %s 일봉 score=%d → STRONG",
                         name, signal.score,
                     )
+                    signal = SignalResult(
+                        signal_type=signal.signal_type,
+                        strength=SignalStrength.STRONG,
+                        score=signal.score,
+                        reasons=signal.reasons,
+                        warnings=signal.warnings,
+                        rsi=signal.rsi,
+                        macd_cross=signal.macd_cross,
+                        vol_ratio=signal.vol_ratio,
+                    )
                 elif is_largecap and abs(signal.score) >= LARGECAP_DAILY_MIN_SCORE:
                     logger.info(
                         "[대형주 완화] %s 일봉 score=%d → STRONG 승격",
                         name, signal.score,
+                    )
+                    signal = SignalResult(
+                        signal_type=signal.signal_type,
+                        strength=SignalStrength.STRONG,
+                        score=signal.score,
+                        reasons=signal.reasons,
+                        warnings=signal.warnings,
+                        rsi=signal.rsi,
+                        macd_cross=signal.macd_cross,
+                        vol_ratio=signal.vol_ratio,
                     )
                 else:
                     continue
