@@ -988,6 +988,8 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
         if ticker not in positions:
             return
         pos = positions[ticker]
+        if pos.get("manual", False):
+            return
         if pos.get("selling"):
             return
 
