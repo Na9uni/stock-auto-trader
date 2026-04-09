@@ -1,8 +1,11 @@
 """변동성 돌파 전략 — 래리 윌리엄스 방식.
 
-목표가 = 당일 시가 + (전일 고가 - 전일 저가) × K
+목표가 = 당일 시가 + 5일 ATR × K
 마켓 필터: 시가 > 10일 이동평균
-장중 목표가 돌파 시 매수 → 익일 시가 매도
+장중 목표가 돌파 시 매수 → 트레일링 스탑 청산
+시간대별 가중치: 09:10~09:30, 점심시간 → MEDIUM (자동매매 안 함, 알림만)
+
+TODO: 배당락일 필터 (키움 opt10059 TR), 어닝 일정 필터 (KRX 크롤링)
 """
 
 from __future__ import annotations
@@ -98,12 +101,28 @@ class VBStrategy:
                 if avg_vol > 0 and prev_vol < avg_vol * 0.5:
                     return self._neutral(f"거래량 부족 (전일 {prev_vol:,} < 평균 {avg_vol:,.0f}의 50%)")
 
+            # 4) 시간대별 신호 품질 필터
+            # 09:10~09:30 초반 변동성 구간: 거짓 돌파 위험 → MEDIUM으로 강도 하향
+            # 11:30~13:00 저유동성 구간: 거짓 돌파 위험 → MEDIUM으로 강도 하향
+            # 나머지: STRONG (정상)
+            from datetime import datetime as _dt
+            _now = _dt.now()
+            _hour, _min = _now.hour, _now.minute
+            _time_strength = SignalStrength.STRONG
+            _time_note = ""
+            if _hour == 9 and _min < 30:
+                _time_strength = SignalStrength.MEDIUM
+                _time_note = " (09:10~09:30 초반변동성 주의)"
+            elif 11 <= _hour <= 12 and (_hour == 11 and _min >= 30 or _hour == 12):
+                _time_strength = SignalStrength.MEDIUM
+                _time_note = " (점심시간 저유동성 주의)"
+
             return SignalResult(
                 signal_type=SignalType.BUY,
-                strength=SignalStrength.STRONG,
+                strength=_time_strength,
                 score=10.0,
                 reasons=[
-                    f"돌파! 현재가 {ctx.current_price:,} >= 목표가 {target_price:,}",
+                    f"돌파! 현재가 {ctx.current_price:,} >= 목표가 {target_price:,}{_time_note}",
                     f"시가{today_open:,} + range{prev_range:,}×{k}",
                     f"MA10={ma10:,.0f}",
                 ],
