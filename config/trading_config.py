@@ -48,7 +48,7 @@ class TradingConfig:
     vb_k: float = 0.5
     vb_k_individual: float = 0.6       # 개별주 K값 (노이즈 필터링 강화)
 
-    # 전략 선택: "vb" | "score" | "combo"
+    # 전략 선택: "vb" | "score" | "combo" | "trend" | "auto"
     strategy: str = "combo"
 
     # 시간 제한

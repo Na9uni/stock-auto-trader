@@ -9,3 +9,4 @@ logs/
 *.log
 .vscode/
 data/macro_override.json
+.claude/settings.local.json

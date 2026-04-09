@@ -162,9 +162,9 @@ def _is_market_crash() -> bool:
             if change <= -3.0:
                 logger.warning("[급락 감지] %s %.1f%% — 매수 전면 중단", idx_name, change)
                 return True
-    except Exception:
-        pass
-    return False
+    except Exception as e:
+        logger.error("[급락감지] 지수 조회 실패: %s — 안전을 위해 매수 차단", e)
+        return True  # fail-safe: assume crash
 
 
 def fetch_index_prices() -> dict:

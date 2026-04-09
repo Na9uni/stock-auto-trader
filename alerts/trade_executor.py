@@ -115,7 +115,9 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
     from trading.auto_trader import execute_buy, execute_sell
     from alerts.file_io import save_auto_positions
 
-    if not AUTO_TRADE_ENABLED or OPERATION_MODE != "LIVE":
+    if not AUTO_TRADE_ENABLED:
+        return
+    if OPERATION_MODE not in ("LIVE", "MOCK"):
         return
     if not is_whitelisted(ticker):
         return
@@ -139,9 +141,14 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
 
     # ── 매수 ──
     if signal.signal_type == SignalType.BUY and signal.strength == SignalStrength.STRONG:
-        if ai_decision != "매수":
-            logger.debug("[자동매매] %s AI 판단=%s → 매수 보류", name, ai_decision)
+        # AI 판단: "매도"이면 차단, 실패/빈값은 경고 후 진행
+        if ai_decision == "매도":
+            logger.info("[자동매매] %s AI 판단=매도 → 매수 차단", name)
             return
+        if ai_decision and ai_decision != "매수":
+            logger.info("[자동매매] %s AI 판단=%s → 경고 후 진행", name, ai_decision)
+        if not ai_decision:
+            logger.debug("[자동매매] %s AI 미응답 → AI 없이 진행", name)
 
         # 방어 체크
         if is_monthly_loss_exceeded():
@@ -184,22 +191,51 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
             return
 
         _buy_in_progress.add(ticker)
-        buy_result = execute_buy(ticker, name, quantity, price,
-                                 rule_name=f"자동매매_{signal.strength.name}")
-        if buy_result.get("status") == "pending":
+
+        if OPERATION_MODE == "MOCK":
+            # MOCK 모드: 실제 주문 안 보내고 가상 체결 알림
             logger.info(
-                "[자동매매] %s 매수 접수 %d주 @%s (금액 %s)",
+                "[가상매매] %s 매수 체결 %d주 @%s (금액 %s)",
                 name, quantity, f"{price:,}", f"{amount:,}",
             )
             notifier.send_to_users(
                 [get_admin_id()],
-                f"🛒 [자동매매] {name} 매수 접수\n"
-                f"수량: {quantity}주 / 가격: {price:,}원\n"
-                f"사유: {', '.join(signal.reasons[:3])}"
+                f"🛒 [가상 매수 체결] {name} ({ticker})\n"
+                f"💰 수량: {quantity}주 / 가격: {price:,}원\n"
+                f"💵 투자금액: {amount:,}원\n"
+                f"📊 사유: {', '.join(signal.reasons[:3])}\n"
+                f"⚠️ 모의투자 — 실제 돈은 사용되지 않았습니다"
                 + CMD_FOOTER,
             )
-        else:
+            # 가상 포지션 기록
+            positions = load_auto_positions()
+            positions[ticker] = {
+                "name": name,
+                "qty": quantity,
+                "buy_price": price,
+                "buy_amount": amount,
+                "buy_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "mock": True,
+            }
+            save_auto_positions(positions)
             _buy_in_progress.discard(ticker)
+        else:
+            buy_result = execute_buy(ticker, name, quantity, price,
+                                     rule_name=f"자동매매_{signal.strength.name}")
+            if buy_result.get("status") == "pending":
+                logger.info(
+                    "[자동매매] %s 매수 접수 %d주 @%s (금액 %s)",
+                    name, quantity, f"{price:,}", f"{amount:,}",
+                )
+                notifier.send_to_users(
+                    [get_admin_id()],
+                    f"🛒 [자동매매] {name} 매수 접수\n"
+                    f"수량: {quantity}주 / 가격: {price:,}원\n"
+                    f"사유: {', '.join(signal.reasons[:3])}"
+                    + CMD_FOOTER,
+                )
+            else:
+                _buy_in_progress.discard(ticker)
 
     # ── 매도 ──
     elif signal.signal_type == SignalType.SELL:
@@ -217,12 +253,40 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
             return
 
         current_price = int(stock.get("current_price", 0))
-        sell_result = execute_sell(ticker, name, qty, current_price,
-                                   rule_name=f"자동매매_{signal.strength.name}")
-        if sell_result.get("status") == "pending":
-            fresh = load_auto_positions()
-            if ticker in fresh:
-                fresh[ticker]["selling"] = True
-                fresh[ticker]["sell_order_id"] = sell_result.get("order_id", "")
-                save_auto_positions(fresh)
-            logger.info("[자동매매] %s 매도 접수 %d주", name, qty)
+
+        if OPERATION_MODE == "MOCK":
+            # MOCK 모드: 가상 매도 체결 알림
+            buy_price = int(pos.get("buy_price", 0))
+            pnl = (current_price - buy_price) * qty if buy_price > 0 else 0
+            pnl_pct = ((current_price - buy_price) / buy_price * 100) if buy_price > 0 else 0
+            emoji = "📈" if pnl >= 0 else "📉"
+
+            logger.info(
+                "[가상매매] %s 매도 체결 %d주 @%s (손익 %s원)",
+                name, qty, f"{current_price:,}", f"{pnl:+,}",
+            )
+            notifier.send_to_users(
+                [get_admin_id()],
+                f"💸 [가상 매도 체결] {name} ({ticker})\n"
+                f"💰 수량: {qty}주 / 매도가: {current_price:,}원\n"
+                f"📊 매수가: {buy_price:,}원\n"
+                f"{emoji} 손익: {pnl:+,}원 ({pnl_pct:+.1f}%)\n"
+                f"📊 사유: {', '.join(signal.reasons[:3])}\n"
+                f"⚠️ 모의투자 — 실제 돈은 사용되지 않았습니다"
+                + CMD_FOOTER,
+            )
+            # 가상 포지션 제거
+            positions = load_auto_positions()
+            if ticker in positions:
+                del positions[ticker]
+                save_auto_positions(positions)
+        else:
+            sell_result = execute_sell(ticker, name, qty, current_price,
+                                       rule_name=f"자동매매_{signal.strength.name}")
+            if sell_result.get("status") == "pending":
+                fresh = load_auto_positions()
+                if ticker in fresh:
+                    fresh[ticker]["selling"] = True
+                    fresh[ticker]["sell_order_id"] = sell_result.get("order_id", "")
+                    save_auto_positions(fresh)
+                logger.info("[자동매매] %s 매도 접수 %d주", name, qty)

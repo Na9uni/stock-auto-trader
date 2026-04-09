@@ -36,6 +36,8 @@ class BacktesterV2:
         - 매수: 목표가 + 보호마진
         - 매도: 익일 시가 - 보호마진 OR 장중 손절/트레일링
         """
+        # TODO: 현재 VB만 테스트. combo 거부권(score <= -3) 효과는 미반영.
+        # 실전은 auto_strategy에서 combo+trend 조합이므로 백테스트 결과와 괴리 가능.
         df = df.copy().reset_index(drop=True)
         df["range"] = df["high"] - df["low"]
         df["ma10"] = df["close"].rolling(10).mean()

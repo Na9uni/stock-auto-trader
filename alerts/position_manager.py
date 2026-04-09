@@ -140,8 +140,61 @@ def check_auto_positions() -> None:
     ta_pct = TRAILING_ACTIVATE_PCT
     ts_pct = TRAILING_STOP_PCT
 
+    # ── P1-8: 비상 모니터링 — 미실현 손실이 일일한도의 2배 초과 시 경고 ──
+    from alerts.market_guard import MAX_DAILY_LOSS
+    total_unrealized_loss = 0
+    for _t, _p in positions.items():
+        if _p.get("manual"):
+            continue
+        _bp = _p.get("buy_price", 0)
+        _cp = int(all_stocks.get(_t, {}).get("current_price", 0))
+        if _bp > 0 and _cp > 0:
+            _qty = int(_p.get("qty", 0))
+            _unrealized = (_cp - _bp) * _qty
+            if _unrealized < 0:
+                total_unrealized_loss += abs(_unrealized)
+
+    if MAX_DAILY_LOSS > 0 and total_unrealized_loss > MAX_DAILY_LOSS * 2:
+        logger.warning(
+            "[비상 경고] 미실현 손실 %s원 > 일일한도 2배 (%s원) — 전량 매도 검토 필요",
+            f"{total_unrealized_loss:,}", f"{MAX_DAILY_LOSS * 2:,}",
+        )
+        try:
+            notifier.send_to_users(
+                [get_admin_id()],
+                f"🚨 [비상 경고] 미실현 손실 초과!\n"
+                f"미실현 손실: {total_unrealized_loss:,}원\n"
+                f"일일한도 2배: {MAX_DAILY_LOSS * 2:,}원\n"
+                f"⚠️ 전량 매도를 검토하세요!"
+                + CMD_FOOTER,
+            )
+        except Exception:
+            pass
+
     for ticker, pos in list(positions.items()):
         if pos.get("manual", False):
+            # ── P1-9: manual 포지션도 비상 손절만 적용 (-15%) ──
+            buy_price = pos.get("buy_price", 0)
+            name = pos.get("name", ticker)
+            current_price = int(all_stocks.get(ticker, {}).get("current_price", 0))
+            if buy_price > 0 and current_price > 0:
+                pct = (current_price - buy_price) / buy_price * 100
+                if pct <= -15:
+                    logger.warning(
+                        "[비상손절] %s manual 포지션 -15%% 도달 (현재가 %s, 매수가 %s)",
+                        name, current_price, buy_price,
+                    )
+                    try:
+                        notifier.send_to_users(
+                            [get_admin_id()],
+                            f"🚨 [비상 경고] {name} ({ticker})\n"
+                            f"💰 매수가: {buy_price:,}원 → 현재가: {current_price:,}원\n"
+                            f"📉 손실: {pct:.1f}%\n"
+                            f"⚠️ manual 포지션이라 자동매도 안 됨. 직접 확인 필요!"
+                            + CMD_FOOTER,
+                        )
+                    except Exception:
+                        pass
             continue
         if pos.get("selling"):
             continue

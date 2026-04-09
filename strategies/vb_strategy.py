@@ -31,6 +31,8 @@ class VBStrategy:
             return self._neutral("데이터 부족")
 
         # K값: ETF는 기본(0.5), 개별주는 높게(0.6)
+        # TODO: K값 walk-forward 검증 필요. 현재 ETF=0.5, 개별주=0.6은 경험적 값.
+        # backtest/optimize.py에서 그리드서치 가능하나 과적합 위험 있음.
         k = self._config.vb_k if is_etf(ctx.ticker) else self._config.vb_k_individual
 
         # 일봉 데이터 추출
@@ -53,7 +55,12 @@ class VBStrategy:
         today_open = int(today["open"])
         prev_high = int(yesterday["high"])
         prev_low = int(yesterday["low"])
-        prev_range = prev_high - prev_low
+        # 5일 ATR (전일까지 5일간 range 평균)
+        if len(df) >= 7:
+            ranges = df["high"].iloc[-7:-1] - df["low"].iloc[-7:-1]  # 어제까지 6일, 상위 5일
+            prev_range = int(ranges.tail(5).mean())
+        else:
+            prev_range = prev_high - prev_low
         target_price = today_open + int(prev_range * k)
 
         # MA10/20/60 계산 (전일까지)
@@ -83,6 +90,14 @@ class VBStrategy:
         # 쿨다운이 중복 진입을 방지하므로 intraday_high 사용 가능
         check_price = max(ctx.current_price, ctx.intraday_high) if ctx.intraday_high > 0 else ctx.current_price
         if check_price >= target_price:
+            # 거래량 확인: 전일 거래량이 5일 평균의 50% 이상이어야 함
+            if "volume" in df.columns and len(df) >= 6:
+                df["volume"] = pd.to_numeric(df["volume"], errors="coerce")
+                prev_vol = int(yesterday.get("volume", 0))
+                avg_vol = float(df["volume"].tail(6).head(5).mean())
+                if avg_vol > 0 and prev_vol < avg_vol * 0.5:
+                    return self._neutral(f"거래량 부족 (전일 {prev_vol:,} < 평균 {avg_vol:,.0f}의 50%)")
+
             return SignalResult(
                 signal_type=SignalType.BUY,
                 strength=SignalStrength.STRONG,

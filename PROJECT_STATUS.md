@@ -8,17 +8,19 @@ https://github.com/Na9uni/stock-auto-trader (private)
 - IPC: JSON 파일 (kiwoom_data.json, order_queue.json, auto_positions.json)
 - 키움 OpenAPI+: 30초 폴링 + 실시간 체결/호가(SetRealReg)
 
-## 파일 구조 (v2 재설계)
+## 파일 구조 (v3 AUTO 전환)
 ```
 stock/
-├── config/                        # [NEW] 설정 통합
+├── config/                        # 설정 통합
 │   ├── trading_config.py          # TradingConfig (frozen dataclass, .env 로드)
 │   └── whitelist.py               # 화이트리스트 + ETF/개별주 분류
-├── strategies/                    # [NEW] 전략 플러그인
+├── strategies/                    # 전략 플러그인
 │   ├── base.py                    # Strategy 프로토콜, MarketContext, SignalResult
-│   ├── vb_strategy.py             # 변동성 돌파 (주 전략)
+│   ├── vb_strategy.py             # 변동성 돌파 (데이트레이딩)
 │   ├── score_strategy.py          # 합산 전략 (거부권 모드)
-│   └── combo_strategy.py          # VB + 거부권 조합
+│   ├── combo_strategy.py          # VB + 거부권 조합
+│   ├── trend_strategy.py          # [NEW] 추세추종 (골든/데드크로스)
+│   └── auto_strategy.py           # [NEW] 자동 전환 (상승장=VB, 하락장=추세추종)
 ├── alerts/
 │   ├── analysis_scheduler.py      # 메인 스케줄러 (전략 연결 완료)
 │   ├── signal_detector.py         # RSI/MACD/볼린저 합산 (거부권용)
@@ -51,9 +53,21 @@ stock/
 └── .env                           # 환경변수
 ```
 
-## 전략 (v2: 변동성 돌파 + 합산 거부권)
+## 전략 (v3: AUTO 자동 전환)
 
-### 주 전략: 변동성 돌파
+### 현재 전략: AUTO (2026-04-09~)
+- 시장 레짐 자동 판단: MA20 > MA60 → 상승장, MA20 < MA60 → 하락장
+- 급락 감지: 현재가가 MA20보다 10% 이상 아래면 → 하락장 강제 전환
+- 상승장 → 변동성 돌파 (데이트레이딩) + 합산 거부권
+- 하락장 → 추세추종 (골든/데드크로스) → 거의 안 사고 대기
+- 전략 선택: STRATEGY=auto (vb | score | combo | trend | auto)
+
+### 추세추종 전략 (trend_strategy.py, 2026-04-08 추가)
+- 매수: 5일선이 20일선을 위로 뚫을 때 (골든크로스) + 60일선 위
+- 매도: 5일선이 20일선을 아래로 뚫을 때 (데드크로스)
+- 손절: -5%
+
+### 변동성 돌파 (주 전략)
 - 목표가 = 시가 + 전일레인지 x K (ETF: 0.5, 개별주: 0.6)
 - 마켓 필터: 시가 > MA10
 - 시장 레짐 필터: MA20 > MA60 (상승장만 진입)
@@ -83,11 +97,11 @@ MAX_MONTHLY_LOSS=100000   # 1000000 -> 100000 (10%)
 MAX_CONSEC_STOPLOSS=2     # 3 -> 2
 
 # 전략
-STRATEGY=combo            # [NEW] vb | score | combo
+STRATEGY=auto             # [NEW] vb | score | combo | trend | auto
 VB_K=0.5                  # [NEW] ETF K값
 VB_K_INDIVIDUAL=0.6       # [NEW] 개별주 K값
 BUY_START_MINUTE=10       # [NEW] 장 시작 10분 이후
-BUY_END_HOUR=14           # [NEW] 14시 이후 매수 차단
+BUY_END_HOUR=16           # 16시 이후 매수 차단 (데이터 수집 단계 완화)
 ```
 
 ## 백테스트 v2 결과 (비용 현실화)
@@ -123,11 +137,16 @@ BUY_END_HOUR=14           # [NEW] 14시 이후 매수 차단
 거래 횟수 대폭 감소 (레짐 필터 효과).
 
 ## 남은 과제
-1. 하락장 추가 방어 (MA20 < MA120이면 매매 완전 중단)
-2. ATR 기반 동적 손절 (고정 2% -> 1.5xATR)
-3. K값 종목별 최적화 (walk-forward 검증)
-4. 소형주(보성파워텍 등) 비용 2.2% -> 화이트리스트 재검토
-5. 5분봉 데이터 축적 후 장중 백테스트 전환
+1. ~~AUTO 전략 구현~~ ✅ (2026-04-09)
+2. ~~추세추종 전략 추가~~ ✅ (2026-04-08)
+3. ~~급락 감지 보조 필터~~ ✅ (현재가 vs MA20 이격도 -10%)
+4. 하락장 추가 방어 (MA20 < MA120이면 매매 완전 중단)
+5. ATR 기반 동적 손절 (고정 2% -> 1.5xATR)
+6. K값 종목별 최적화 (walk-forward 검증)
+7. 소형주(보성파워텍 등) 비용 2.2% -> 화이트리스트 재검토
+8. 5분봉 데이터 축적 후 장중 백테스트 전환
+9. 모듈 분리 (analysis_scheduler.py → _state/signal_runner/order_manager)
+10. AUTO 하락장 방어 개선 (백테스트 하락장 -71만 → -30만 이하 목표)
 
 ## 실전 거래 기록
 | 날짜 | 종목 | 보유시간 | 손익 | 사유 |

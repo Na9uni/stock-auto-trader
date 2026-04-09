@@ -29,7 +29,6 @@ class MacroRegime(Enum):
     CRISIS = "crisis"           # 전쟁/패닉 → 현금 100%, 거래 금지
     CAUTION = "caution"         # 불안정 → 포지션 축소, ETF만
     NORMAL = "normal"           # 정상 → 전 전략 가동
-    RECOVERY = "recovery"       # 위기 후 회복 → 공격적 매수 기회
 
 
 @dataclass
@@ -193,20 +192,22 @@ def assess_current() -> MacroStatus:
     없으면 기본값 (전쟁 진행 중) 사용.
     텔레그램 /레짐 명령으로 override 변경 가능.
     """
-    # 기본값: NORMAL (안전). 위기 시에만 override로 전환.
-    # 이전에는 war_active=True가 기본이어서 정상장에서도 CRISIS였음.
+    # 기본값: 보수적 (CAUTION). 오버라이드 없으면 자동으로 신중 모드.
+    # crisis_score 2~3 수준 → CAUTION 또는 borderline NORMAL.
     defaults = {
-        "oil_price": 75,
+        "oil_price": 90,
         "oil_price_3m_ago": 72,
-        "fx_rate": 1350,
-        "fx_rate_3m_ago": 1330,
-        "vkospi": 15,
+        "fx_rate": 1450,
+        "fx_rate_3m_ago": 1350,
+        "vkospi": 22,
         "kospi_change_1d": 0.0,
         "war_active": False,
     }
 
     # override 파일이 있으면 해당 값으로 덮어쓰기 (텔레그램 /레짐 명령)
     overrides = _load_override()
+    if not overrides:
+        logger.warning("[매크로] 오버라이드 파일 없음 — 보수적 기본값 사용")
     merged = {**defaults, **overrides}
 
     return assess_macro(**merged)

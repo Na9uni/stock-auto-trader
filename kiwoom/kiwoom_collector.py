@@ -927,9 +927,13 @@ class KiwoomCollector:
     def collect_daily_candles(self) -> None:
         """Collect daily candles for all tickers."""
         all_tickers = {**self._tickers, **self._interest_tickers}
+        logger.info("일봉 수집 시작: %d종목", len(all_tickers))
         for ticker, name in all_tickers.items():
-            logger.debug("Collecting daily: %s (%s)", ticker, name)
             candles = self.collect_candles_1d(ticker)
+            if candles:
+                logger.info("일봉 수집 OK: %s %d개", name, len(candles))
+            else:
+                logger.warning("일봉 수집 실패: %s (%s)", name, ticker)
             self._update_stock_data(ticker, name, None, candles_1d=candles)
 
     def collect_account_balance(self) -> None:

@@ -1,0 +1,50 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Glob",
+      "Grep",
+      "Bash(python *)",
+      "Bash(pip *)",
+      "Bash(git *)",
+      "Bash(streamlit *)",
+      "Bash(ls *)",
+      "Bash(mkdir *)"
+    ],
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(git push --force*)",
+      "Bash(git reset --hard*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'FILE=\"$CLAUDE_FILE_PATH\"; if [[ \"$FILE\" == *.py ]]; then python -m py_compile \"$FILE\" 2>&1 || exit 2; fi'",
+            "description": "Python 문법 체크 (py 파일 수정 시 자동 실행)"
+          },
+          {
+            "type": "command",
+            "command": "bash -c 'FILE=\"$CLAUDE_FILE_PATH\"; if echo \"$FILE\" | grep -q \"strategies/\"; then echo \"[WARN] 전략 파일 변경됨. 반드시 백테스트 실행 필요: python -m backtest.backtester_v2\" >&2; fi'",
+            "description": "전략 파일 변경 시 백테스트 리마인더"
+          }
+        ]
+      }
+    ],
+    "PreCommit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'python -c \"from strategies.combo_strategy import ComboStrategy; from config.trading_config import TradingConfig\" 2>&1 || exit 2'",
+            "description": "핵심 모듈 임포트 검증"
+          }
+        ]
+      }
+    ]
+  }
+}
