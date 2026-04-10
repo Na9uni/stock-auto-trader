@@ -127,6 +127,7 @@ from alerts.signal_runner import (                   # noqa: F401
     check_signals,
     check_interest_spikes,
     check_targets,
+    check_eod_liquidation,
 )
 
 from alerts.order_manager import (                   # noqa: F401
@@ -208,6 +209,7 @@ def run_scheduler() -> None:
     schedule.every(1).minutes.do(check_order_status)
     schedule.every(1).minutes.do(check_interest_spikes)
     schedule.every(1).minutes.do(check_auto_positions)
+    schedule.every().day.at("15:20").do(check_eod_liquidation)
     schedule.every().day.at("08:30").do(send_premarket_news)
     schedule.every().day.at("09:00").do(send_market_open)
     schedule.every().day.at("15:40").do(send_market_close)

@@ -567,3 +567,94 @@ def check_targets() -> None:
         )
         notifier.send_to_users([get_admin_id()], msg)
         update_cooldown(ck, SignalType.BUY)
+
+
+# ---------------------------------------------------------------------------
+# 장 마감 전 강제 청산 (데이트레이딩 당일 청산 원칙)
+# ---------------------------------------------------------------------------
+
+def check_eod_liquidation() -> None:
+    """15:20 실행: 상승장(VB) 모드 가상/실전 포지션 당일 강제 청산.
+
+    - AUTO 전략의 상승장(데이트레이딩) 포지션만 대상
+    - 추세추종(하락장) 포지션은 제외 (며칠 보유 가능)
+    - manual 포지션 제외
+    """
+    from alerts.file_io import save_auto_positions
+    from alerts.trade_executor import OPERATION_MODE
+
+    data = load_kiwoom_data()
+    if not data:
+        return
+
+    positions = load_auto_positions()
+    if not positions:
+        return
+
+    notifier = TelegramNotifier()
+    liquidated = []
+
+    for ticker, pos in list(positions.items()):
+        # manual, 추세추종 포지션 제외
+        if pos.get("manual"):
+            continue
+        if pos.get("strategy") == "trend_following":
+            continue
+
+        name = pos.get("name", ticker)
+        qty = int(pos.get("qty", 0))
+        bp = int(pos.get("buy_price", 0))
+        cp = int(data.get("stocks", {}).get(ticker, {}).get("current_price", 0))
+
+        if qty <= 0 or cp <= 0:
+            continue
+
+        pnl = (cp - bp) * qty
+        pnl_pct = ((cp - bp) / bp * 100) if bp > 0 else 0
+        emoji = "📈" if pnl >= 0 else "📉"
+
+        if OPERATION_MODE == "MOCK":
+            # 가상 매도
+            logger.info(
+                "[장마감 청산] %s 가상 매도 %d주 @%s (손익 %s원)",
+                name, qty, f"{cp:,}", f"{pnl:+,}",
+            )
+            notifier.send_to_users(
+                [get_admin_id()],
+                f"💸 [장마감 강제 청산] {name} ({ticker})\n"
+                f"💰 수량: {qty}주 / 매도가: {cp:,}원\n"
+                f"📊 매수가: {bp:,}원\n"
+                f"{emoji} 손익: {pnl:+,}원 ({pnl_pct:+.1f}%)\n"
+                f"⏰ 데이트레이딩 당일 청산 원칙\n"
+                f"⚠️ 모의투자 — 실제 돈은 사용되지 않았습니다"
+                + CMD_FOOTER,
+            )
+            # 손실 기록
+            if pnl < 0:
+                record_loss_and_stoploss(abs(pnl))
+            else:
+                reset_consec_stoploss()
+            del positions[ticker]
+            liquidated.append(f"{name} {pnl:+,}원")
+        else:
+            # 실전: 매도 주문 접수
+            from trading.auto_trader import execute_sell
+            sell_result = execute_sell(ticker, name, qty, cp,
+                                       rule_name="자동청산_장마감")
+            if sell_result.get("status") == "pending":
+                pos["selling"] = True
+                pos["sell_order_id"] = sell_result.get("order_id", "")
+                logger.info("[장마감 청산] %s 매도 접수 %d주", name, qty)
+                notifier.send_to_users(
+                    [get_admin_id()],
+                    f"💸 [장마감 강제 청산] {name} ({ticker})\n"
+                    f"💰 수량: {qty}주 / 현재가: {cp:,}원\n"
+                    f"⏰ 데이트레이딩 당일 청산 원칙"
+                    + CMD_FOOTER,
+                )
+                liquidated.append(name)
+
+    save_auto_positions(positions)
+
+    if liquidated:
+        logger.info("[장마감 청산] %d건 완료: %s", len(liquidated), ", ".join(liquidated))
