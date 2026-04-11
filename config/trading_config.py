@@ -55,6 +55,12 @@ class TradingConfig:
     buy_start_minute: int = 10         # 장 시작 후 N분 뒤부터 매수 허용
     buy_end_hour: int = 15             # 이 시간 이후 신규 매수 차단 (_auto_trade 공통)
 
+    # 레짐 엔진 파라미터
+    regime_defense_trigger_pct: float = -2.0     # DEFENSE 전환 KOSPI 등락률 (%)
+    regime_cash_trigger_pct: float = -3.0        # CASH 전환 추가 하락률 (%)
+    regime_swing_volatility_pct: float = 3.0     # SWING 전환 변동성 기준 (%)
+    regime_deescalation_cooldown_min: int = 30   # 디에스컬레이션 쿨다운 (분)
+
     @classmethod
     def from_env(cls) -> TradingConfig:
         """실전: .env에서 로드."""
@@ -80,6 +86,10 @@ class TradingConfig:
             strategy=os.getenv("STRATEGY", "combo").lower(),
             buy_start_minute=int(os.getenv("BUY_START_MINUTE", "10")),
             buy_end_hour=int(os.getenv("BUY_END_HOUR", "15")),
+            regime_defense_trigger_pct=float(os.getenv("REGIME_DEFENSE_TRIGGER_PCT", "-2.0")),
+            regime_cash_trigger_pct=float(os.getenv("REGIME_CASH_TRIGGER_PCT", "-3.0")),
+            regime_swing_volatility_pct=float(os.getenv("REGIME_SWING_VOLATILITY_PCT", "3.0")),
+            regime_deescalation_cooldown_min=int(os.getenv("REGIME_DEESCALATION_COOLDOWN_MIN", "30")),
         )
 
     @classmethod

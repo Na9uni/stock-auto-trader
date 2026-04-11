@@ -134,11 +134,33 @@ def check_auto_positions() -> None:
     if not positions:
         return
 
+    # 레짐별 파라미터 오버라이드
+    try:
+        from strategies.regime_engine import get_regime_engine
+        _regime_params = get_regime_engine().params
+        _regime_sl = _regime_params.stoploss_pct
+        _regime_ta = _regime_params.trailing_activate_pct
+        _regime_ts = _regime_params.trailing_stop_pct
+    except Exception:
+        _regime_sl = STOPLOSS_PCT
+        _regime_ta = TRAILING_ACTIVATE_PCT
+        _regime_ts = TRAILING_STOP_PCT
+
+    # 방어 모드 해제 시 defense_cut 플래그 정리
+    try:
+        from strategies.regime_engine import get_regime_engine, RegimeState
+        engine = get_regime_engine()
+        if engine.state not in (RegimeState.DEFENSE, RegimeState.CASH):
+            for pos in positions.values():
+                pos.pop("defense_cut", None)
+    except Exception:
+        pass
+
     notifier = TelegramNotifier()
     changed = False
-    sl_pct = STOPLOSS_PCT
-    ta_pct = TRAILING_ACTIVATE_PCT
-    ts_pct = TRAILING_STOP_PCT
+    sl_pct = _regime_sl
+    ta_pct = _regime_ta
+    ts_pct = _regime_ts
 
     # ── P1-8: 비상 모니터링 — 미실현 손실이 일일한도의 2배 초과 시 경고 ──
     from alerts.market_guard import MAX_DAILY_LOSS

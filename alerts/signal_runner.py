@@ -201,42 +201,27 @@ def check_signals() -> None:
         except (ValueError, TypeError):
             pass
 
-    # ── 매크로 레짐 체크 ──
-    from strategies.macro_regime import assess_current, MacroRegime
-    macro = assess_current()
+    # ── 4-Mode 레짐 감지 ──
+    from strategies.regime_engine import get_regime_engine, RegimeState
+    from alerts.market_guard import fetch_index_prices
+    from strategies.macro_regime import assess_current
 
-    # 위기MR 포지션 복구 (재시작 시, 레짐 무관)
-    _restore_crisis_mr_position()
+    engine = get_regime_engine()
+    index_data = fetch_index_prices()
+    macro_status = assess_current()
+    regime = engine.detect(index_data, macro_status)
+    regime_params = engine.params
 
-    # 위기MR 포지션이 열려 있으면 레짐과 무관하게 청산 로직 실행
-    from alerts import crisis_manager as _cm
-    had_position = _cm._crisis_mr_position is not None
-    if had_position:
+    # CASH: 전량 청산, 매매 금지
+    if regime == RegimeState.CASH:
+        _execute_regime_liquidation(data, engine)
+        return
+
+    # DEFENSE: 50% 축소, crisis_meanrev만 허용
+    if regime == RegimeState.DEFENSE:
+        _execute_defense_cuts(data, engine)
+        _restore_crisis_mr_position()
         _check_crisis_meanrev(data)
-
-    if macro.regime in (MacroRegime.CRISIS, MacroRegime.CAUTION):
-        if macro.regime == MacroRegime.CAUTION:
-            logger.debug("[매크로] CAUTION — VB/combo 차단, 위기MR만 허용")
-        if not had_position and _cm._crisis_mr_position is None and _collector_alive:
-            _check_crisis_meanrev(data)
-        # score 모드에서 기존 포지션의 매도 신호는 허용
-        if _STRATEGY.name == "score_veto" and _collector_alive:
-            from ai.ai_analyzer import AIAnalyzer
-            _n = TelegramNotifier()
-            _a = AIAnalyzer()
-            now = datetime.now()
-            if now.minute % 5 == 0:
-                for ticker, info in data.get("stocks", {}).items():
-                    try:
-                        positions = load_auto_positions()
-                        if ticker not in positions:
-                            continue
-                        if info.get("current_price", 0) == 0:
-                            continue
-                        name = info.get("name", ticker)
-                        _run_signal_for_stock(ticker, name, info, _n, _a)
-                    except Exception:
-                        pass
         return
 
     from ai.ai_analyzer import AIAnalyzer
@@ -534,6 +519,112 @@ def check_interest_spikes() -> None:
         )
         notifier.send_to_users(get_users_for_ticker(ticker), msg)
         update_cooldown(ck, SignalType.BUY)
+
+
+# ---------------------------------------------------------------------------
+# 레짐 기반 포지션 관리
+# ---------------------------------------------------------------------------
+
+
+def _execute_defense_cuts(data: dict, engine) -> None:
+    """DEFENSE 모드: 비-manual 포지션 50% 축소 (1회만)."""
+    from alerts.file_io import save_auto_positions
+    from alerts.trade_executor import OPERATION_MODE
+
+    positions = load_auto_positions()
+    notifier = TelegramNotifier()
+
+    for ticker, pos in list(positions.items()):
+        if pos.get("manual") or pos.get("selling") or pos.get("defense_cut"):
+            continue
+
+        name = pos.get("name", ticker)
+        qty = int(pos.get("qty", 0))
+        cut_qty = qty // 2
+        if cut_qty <= 0:
+            continue
+
+        cp = int(data.get("stocks", {}).get(ticker, {}).get("current_price", 0))
+        if cp <= 0:
+            continue
+
+        bp = int(pos.get("buy_price", 0))
+        pnl = (cp - bp) * cut_qty if bp > 0 else 0
+
+        if OPERATION_MODE == "MOCK":
+            logger.warning("[DEFENSE 축소] %s %d주 → %d주 (가상)", name, qty, qty - cut_qty)
+            notifier.send_to_users(
+                [get_admin_id()],
+                f"[DEFENSE 비중 축소] {name}\n"
+                f"수량: {qty}주 → {qty - cut_qty}주 ({cut_qty}주 매도)\n"
+                f"손익: {pnl:+,}원\n"
+                f"주의: 모의투자"
+                + CMD_FOOTER,
+            )
+            pos["qty"] = qty - cut_qty
+            pos["defense_cut"] = True
+        else:
+            from trading.auto_trader import execute_sell
+            result = execute_sell(ticker, name, cut_qty, cp, rule_name="자동청산_DEFENSE축소")
+            if result.get("status") == "pending":
+                pos["defense_cut"] = True
+                logger.warning("[DEFENSE 축소] %s %d주 매도 접수", name, cut_qty)
+
+    save_auto_positions(positions)
+
+
+def _execute_regime_liquidation(data: dict, engine) -> None:
+    """CASH 모드: 비-manual 포지션 전량 청산."""
+    from alerts.file_io import save_auto_positions
+    from alerts.trade_executor import OPERATION_MODE
+
+    positions = load_auto_positions()
+    notifier = TelegramNotifier()
+    liquidated = []
+
+    for ticker, pos in list(positions.items()):
+        if pos.get("manual") or pos.get("selling"):
+            continue
+
+        name = pos.get("name", ticker)
+        qty = int(pos.get("qty", 0))
+        if qty <= 0:
+            continue
+
+        cp = int(data.get("stocks", {}).get(ticker, {}).get("current_price", 0))
+        if cp <= 0:
+            continue
+
+        bp = int(pos.get("buy_price", 0))
+        pnl = (cp - bp) * qty if bp > 0 else 0
+
+        if OPERATION_MODE == "MOCK":
+            logger.warning("[CASH 청산] %s 전량 %d주 매도 (가상)", name, qty)
+            notifier.send_to_users(
+                [get_admin_id()],
+                f"[CASH 전량 청산] {name}\n"
+                f"수량: {qty}주 / 매도가: {cp:,}원\n"
+                f"손익: {pnl:+,}원\n"
+                f"주의: 모의투자"
+                + CMD_FOOTER,
+            )
+            if pnl < 0:
+                record_loss_and_stoploss(abs(pnl))
+            else:
+                reset_consec_stoploss()
+            del positions[ticker]
+            liquidated.append(name)
+        else:
+            from trading.auto_trader import execute_sell
+            result = execute_sell(ticker, name, qty, cp, rule_name="자동청산_CASH전량")
+            if result.get("status") == "pending":
+                pos["selling"] = True
+                pos["sell_order_id"] = result.get("order_id", "")
+                liquidated.append(name)
+
+    save_auto_positions(positions)
+    if liquidated:
+        logger.warning("[CASH 청산] %d건: %s", len(liquidated), ", ".join(liquidated))
 
 
 # ---------------------------------------------------------------------------

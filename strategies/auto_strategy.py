@@ -38,6 +38,20 @@ class AutoStrategy:
         2차: 현재가 vs MA20 이격도 (급락 감지 보조 필터)
              → 현재가가 MA20보다 10% 이상 아래면 급락으로 판단, bear 전환
         """
+        # 시스템 레짐이 DEFENSE/CASH/SWING이면 per-stock 판단 무시
+        try:
+            from strategies.regime_engine import get_regime_engine, RegimeState
+            system_regime = get_regime_engine().state
+            if system_regime == RegimeState.CASH:
+                return "bear"
+            if system_regime == RegimeState.DEFENSE:
+                return "bear"
+            if system_regime == RegimeState.SWING:
+                return "bear"  # 스윙 모드에서는 보수적으로
+            # NORMAL: 기존 per-stock MA20/MA60 로직 사용
+        except Exception:
+            pass  # 레짐 엔진 실패 시 기존 로직으로 폴백
+
         candles = ctx.candles_1d_raw
         if not candles or len(candles) < 61:
             return "unknown"
