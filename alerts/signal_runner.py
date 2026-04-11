@@ -686,10 +686,12 @@ def check_eod_liquidation() -> None:
     liquidated = []
 
     for ticker, pos in list(positions.items()):
-        # manual, 추세추종 포지션 제외
+        # manual, 추세추종, 이미 매도 중인 포지션 제외
         if pos.get("manual"):
             continue
         if pos.get("strategy") == "trend_following":
+            continue
+        if pos.get("selling"):
             continue
 
         name = pos.get("name", ticker)

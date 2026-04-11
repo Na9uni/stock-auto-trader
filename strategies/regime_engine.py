@@ -183,14 +183,22 @@ class RegimeEngine:
         # 두 지수 중 더 큰 하락폭 사용
         worst_index_change = min(kospi_change, kosdaq_change)
 
-        # C1: 누적 하락 추적 (최근 5일)
-        self._recent_changes.append(worst_index_change)
-        self._recent_changes = self._recent_changes[-5:]
-
         # index_data가 비었으면 fail-safe: 현재 상태 유지 (fail-closed)
+        # 빈 데이터로 _recent_changes를 오염시키지 않기 위해 여기서 먼저 체크
         if not index_data or "KOSPI" not in index_data:
             logger.warning("[레짐] 지수 데이터 없음 — 현재 상태(%s) 유지", self._current_state.value)
             return self._current_state
+
+        # C1: 누적 하락 추적 (날짜별 1회만 기록 — 매분 호출돼도 당일 최악값만 갱신)
+        today_str = date.today().isoformat()
+        if self._recent_changes and self._recent_changes[-1][0] == today_str:
+            # 당일 이미 기록됨 → 더 나쁜 값으로 갱신
+            prev_val = self._recent_changes[-1][1]
+            self._recent_changes[-1] = (today_str, min(prev_val, worst_index_change))
+        else:
+            # 새 날짜 → 추가
+            self._recent_changes.append((today_str, worst_index_change))
+            self._recent_changes = self._recent_changes[-5:]  # 최근 5일만 유지
 
         # config에서 임계값 가져오기
         defense_trigger = getattr(self._config, "regime_defense_trigger_pct", -2.0)
@@ -233,8 +241,8 @@ class RegimeEngine:
                     f"(기준: {cash_trigger}%)"
                 )
 
-        # C1: 누적 하락 감지 (느린 하락장 방어)
-        cumulative_5d = sum(self._recent_changes[-5:]) if len(self._recent_changes) >= 3 else 0
+        # C1: 누적 하락 감지 (느린 하락장 방어) — 날짜별 최악값의 합산
+        cumulative_5d = sum(v for _, v in self._recent_changes[-5:]) if len(self._recent_changes) >= 3 else 0
         if cumulative_5d <= -8.0 and new_state == RegimeState.NORMAL:
             new_state = RegimeState.DEFENSE
             reason = f"5일 누적 하락 {cumulative_5d:.1f}% (기준: -8%)"
