@@ -123,7 +123,7 @@ def _check_crisis_meanrev(data: dict) -> None:
 
     # 보유 중이면 청산 로직은 항상 실행 (매매 비활성이어도 열린 포지션은 관리)
     # 신규 매수만 차단
-    buy_allowed = _trade_exec.AUTO_TRADE_ENABLED and _trade_exec.OPERATION_MODE == "LIVE"
+    buy_allowed = _trade_exec.AUTO_TRADE_ENABLED and _trade_exec.OPERATION_MODE in ("LIVE", "MOCK")
 
     notifier = TelegramNotifier()
     now = datetime.now()

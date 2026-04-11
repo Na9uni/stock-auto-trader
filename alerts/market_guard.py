@@ -165,6 +165,7 @@ def _is_market_crash() -> bool:
     except Exception as e:
         logger.error("[급락감지] 지수 조회 실패: %s — 안전을 위해 매수 차단", e)
         return True  # fail-safe: assume crash
+    return False
 
 
 def fetch_index_prices() -> dict:

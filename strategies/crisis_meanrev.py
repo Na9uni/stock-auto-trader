@@ -9,13 +9,9 @@ Connors & Alvarez (2009) 원논문과 동일한 타임프레임(일봉).
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 import logging
+from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import yfinance as yf
 
@@ -91,7 +87,7 @@ class CrisisMeanRevStrategy:
             )
             return SignalResult(
                 signal_type=SignalType.BUY,
-                strength=SignalStrength.MEDIUM,
+                strength=SignalStrength.STRONG,
                 reasons=[
                     f"RSI2={today_rsi2:.0f}(전일{prev_rsi2:.0f})",
                     f"등락={today_change:+.1f}%",
@@ -131,6 +127,8 @@ def backtest_crisis_meanrev(
     commission: float = 0.00015,    # 편도 0.015%
 ) -> dict:
     """위기장 평균회귀 백테스트 — 실전과 동일한 로직."""
+    import numpy as np
+
     df = df.copy().reset_index(drop=True)
     df["rsi2"] = rsi_2(df["close"])
     df["change_pct"] = df["close"].pct_change() * 100
@@ -383,4 +381,6 @@ def main():
 
 
 if __name__ == "__main__":
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
     main()
