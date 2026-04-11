@@ -754,3 +754,69 @@ def check_eod_liquidation() -> None:
 
     if liquidated:
         logger.info("[장마감 청산] %d건 완료: %s", len(liquidated), ", ".join(liquidated))
+
+
+# ---------------------------------------------------------------------------
+# 개장 전 US 선물 체크 (08:40 스케줄)
+# ---------------------------------------------------------------------------
+
+def check_premarket_us() -> None:
+    """08:40 실행: US 야간 선물 확인 → 급락 시 레짐 선제 전환 + 텔레그램 경고."""
+    from alerts.market_guard import fetch_index_prices
+    from strategies.regime_engine import get_regime_engine, RegimeState
+    from strategies.macro_regime import assess_current
+    import math
+
+    try:
+        index_data = fetch_index_prices()
+    except Exception as e:
+        logger.warning("[개장전 US 체크] 지수 데이터 가져오기 실패: %s", e)
+        return
+
+    sp500 = index_data.get("S&P500", {})
+    nasdaq = index_data.get("NASDAQ", {})
+    sp500_change = sp500.get("change_pct", 0.0)
+    nasdaq_change = nasdaq.get("change_pct", 0.0)
+    if isinstance(sp500_change, float) and math.isnan(sp500_change):
+        sp500_change = 0.0
+    if isinstance(nasdaq_change, float) and math.isnan(nasdaq_change):
+        nasdaq_change = 0.0
+
+    worst_us = min(sp500_change, nasdaq_change)
+
+    if worst_us >= -1.0:
+        logger.info("[개장전 US 체크] S&P500 %+.1f%%, NASDAQ %+.1f%% — 정상", sp500_change, nasdaq_change)
+        return
+
+    # US 급락 감지 → 레짐 선제 전환
+    engine = get_regime_engine()
+    macro_status = assess_current()
+
+    # detect() 호출하여 레짐 전환 (US 데이터가 반영됨)
+    regime = engine.detect(index_data, macro_status)
+
+    # 텔레그램 경고
+    notifier = TelegramNotifier()
+    if worst_us <= -5.0:
+        emoji = "🔴"
+        level = "긴급"
+    elif worst_us <= -3.0:
+        emoji = "🟠"
+        level = "경고"
+    else:
+        emoji = "🟡"
+        level = "주의"
+
+    notifier.send_to_users(
+        [get_admin_id()],
+        f"{emoji} [개장 전 US 시장 {level}]\n"
+        f"S&P500: {sp500_change:+.1f}%\n"
+        f"NASDAQ: {nasdaq_change:+.1f}%\n"
+        f"현재 레짐: {regime.value.upper()}\n"
+        f"{'⚠️ 매수 차단 중' if not engine.params.buy_allowed else '매수 가능'}"
+        + CMD_FOOTER,
+    )
+    logger.warning(
+        "[개장전 US 체크] S&P500 %+.1f%%, NASDAQ %+.1f%% → 레짐 %s",
+        sp500_change, nasdaq_change, regime.value,
+    )
