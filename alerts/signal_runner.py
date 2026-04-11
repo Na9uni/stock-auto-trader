@@ -217,11 +217,9 @@ def check_signals() -> None:
         _execute_regime_liquidation(data, engine)
         return
 
-    # DEFENSE: 50% 축소, crisis_meanrev만 허용
+    # DEFENSE: 50% 축소, 신규 매수 금지
     if regime == RegimeState.DEFENSE:
         _execute_defense_cuts(data, engine)
-        _restore_crisis_mr_position()
-        _check_crisis_meanrev(data)
         return
 
     from ai.ai_analyzer import AIAnalyzer
@@ -568,6 +566,8 @@ def _execute_defense_cuts(data: dict, engine) -> None:
             result = execute_sell(ticker, name, cut_qty, cp, rule_name="자동청산_DEFENSE축소")
             if result.get("status") == "pending":
                 pos["defense_cut"] = True
+                pos["selling"] = True
+                pos["sell_order_id"] = result.get("order_id", "")
                 logger.warning("[DEFENSE 축소] %s %d주 매도 접수", name, cut_qty)
 
     save_auto_positions(positions)

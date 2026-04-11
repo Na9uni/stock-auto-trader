@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import tempfile
 from dataclasses import dataclass
@@ -136,6 +137,7 @@ class RegimeEngine:
         self._defense_index_price: float | None = None
         self._cooldown_until: datetime | None = None
         self._transition_reason: str = ""
+        self._recent_changes: list[float] = []
         self._load_state()
 
     # -- Properties --
@@ -173,8 +175,17 @@ class RegimeEngine:
         kospi_change = kospi.get("change_pct", 0.0)
         kospi_price = kospi.get("price", 0.0)
         kosdaq_change = kosdaq.get("change_pct", 0.0)
+
+        # M6: NaN 처리
+        if math.isnan(kospi_change): kospi_change = 0.0
+        if math.isnan(kosdaq_change): kosdaq_change = 0.0
+
         # 두 지수 중 더 큰 하락폭 사용
         worst_index_change = min(kospi_change, kosdaq_change)
+
+        # C1: 누적 하락 추적 (최근 5일)
+        self._recent_changes.append(worst_index_change)
+        self._recent_changes = self._recent_changes[-5:]
 
         # index_data가 비었으면 fail-safe: 현재 상태 유지 (fail-closed)
         if not index_data or "KOSPI" not in index_data:
@@ -188,6 +199,15 @@ class RegimeEngine:
         # macro_status에서 regime과 crisis_score 추출
         macro_regime = getattr(macro_status, "regime", None)
         macro_regime_value = getattr(macro_regime, "value", "") if macro_regime else ""
+
+        # H4: US 야간 지수 데이터 추출
+        sp500 = index_data.get("S&P500", {})
+        nasdaq = index_data.get("NASDAQ", {})
+        sp500_change = sp500.get("change_pct", 0.0)
+        nasdaq_change = nasdaq.get("change_pct", 0.0)
+        if math.isnan(sp500_change): sp500_change = 0.0
+        if math.isnan(nasdaq_change): nasdaq_change = 0.0
+        worst_us_change = min(sp500_change, nasdaq_change)
 
         new_state = RegimeState.NORMAL
         reason = ""
@@ -213,6 +233,15 @@ class RegimeEngine:
                     f"(기준: {cash_trigger}%)"
                 )
 
+        # C1: 누적 하락 감지 (느린 하락장 방어)
+        cumulative_5d = sum(self._recent_changes[-5:]) if len(self._recent_changes) >= 3 else 0
+        if cumulative_5d <= -8.0 and new_state == RegimeState.NORMAL:
+            new_state = RegimeState.DEFENSE
+            reason = f"5일 누적 하락 {cumulative_5d:.1f}% (기준: -8%)"
+        elif cumulative_5d <= -5.0 and new_state == RegimeState.NORMAL:
+            new_state = RegimeState.SWING
+            reason = f"5일 누적 하락 {cumulative_5d:.1f}% (기준: -5%)"
+
         # DEFENSE 조건 (CASH가 아닐 때만) — KOSPI/KOSDAQ 중 더 큰 하락 사용
         if new_state == RegimeState.NORMAL:
             if worst_index_change <= defense_trigger:
@@ -223,11 +252,16 @@ class RegimeEngine:
                 new_state = RegimeState.DEFENSE
                 reason = f"매크로 CAUTION + 지수 {worst_index_change:+.1f}%"
 
+        # H4: US 야간 급락 반영
+        if worst_us_change <= -5.0 and new_state in (RegimeState.NORMAL, RegimeState.SWING):
+            new_state = RegimeState.DEFENSE
+            reason = f"US 야간 급등락 (S&P/NASDAQ {worst_us_change:+.1f}%)"
+        elif worst_us_change <= -3.0 and new_state == RegimeState.NORMAL:
+            new_state = RegimeState.SWING
+            reason = f"US 야간 급락 (S&P/NASDAQ {worst_us_change:+.1f}%)"
+
         # SWING 조건 (DEFENSE/CASH가 아닐 때만)
         if new_state == RegimeState.NORMAL:
-            swing_trigger = getattr(
-                self._config, "regime_swing_volatility_pct", 3.0
-            )
             # 히스테리시스: SWING 진입은 -1.5%, 복귀는 -0.5% 이상 회복
             swing_entry_threshold = -1.5
             if worst_index_change <= swing_entry_threshold:
@@ -254,7 +288,17 @@ class RegimeEngine:
             self._transition(new_state, reason)
         elif new_severity < cur_severity:
             # 위험 하강 -> 쿨다운 체크
-            if self._can_deescalate():
+            # M8: SWING → NORMAL 히스테리시스 (-0.5% 이상 회복 필요)
+            if (
+                self._current_state == RegimeState.SWING
+                and new_state == RegimeState.NORMAL
+                and worst_index_change < -0.5
+            ):
+                logger.debug(
+                    "[레짐] SWING→NORMAL 히스테리시스: 지수 %+.1f%% < -0.5%%, 유지",
+                    worst_index_change,
+                )
+            elif self._can_deescalate():
                 self._transition(new_state, reason)
             else:
                 logger.debug(
@@ -357,6 +401,7 @@ class RegimeEngine:
                 self._cooldown_until.isoformat() if self._cooldown_until else None
             ),
             "reason": self._transition_reason,
+            "recent_changes": self._recent_changes,
             "date": date.today().isoformat(),
         }
         _STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -429,6 +474,7 @@ class RegimeEngine:
 
         self._defense_index_price = data.get("defense_index_price")
         self._transition_reason = data.get("reason", "")
+        self._recent_changes = data.get("recent_changes", [])
 
         cooldown_str = data.get("cooldown_until")
         if cooldown_str:
