@@ -284,11 +284,20 @@ def check_signals() -> None:
         return
 
     # ── 전략 평가: 단일 루프 ──
+    from config.stock_screener import screen_ticker
+
     for ticker, info in data.get("stocks", {}).items():
         try:
             if not is_whitelisted(ticker):
                 continue
             name = info.get("name", ticker)
+
+            # 종목 품질 스크리너: 불량주 사전 필터링
+            candles_1d = info.get("candles_1d", [])
+            passed, reason = screen_ticker(ticker, info, candles_1d)
+            if not passed:
+                logger.debug("[스크리너] %s 제외: %s", name, reason)
+                continue
 
             ctx = _build_market_context(ticker, name, info, now)
             if ctx is None:
