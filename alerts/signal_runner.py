@@ -388,6 +388,17 @@ def _execute_defense_cuts(data: dict, engine) -> None:
                 f"주의: 모의투자"
                 + CMD_FOOTER,
             )
+            from trading.trade_journal import record_trade
+            record_trade(
+                ticker=ticker, name=name, side="sell",
+                quantity=cut_qty, price=cp,
+                reason="DEFENSE 비중 축소",
+                strategy="",
+                mock=True,
+                buy_price=bp,
+                buy_time=pos.get("buy_time", ""),
+                pnl=pnl,
+            )
             pos["qty"] = qty - cut_qty
             pos["defense_cut"] = True
         else:
@@ -436,6 +447,17 @@ def _execute_regime_liquidation(data: dict, engine) -> None:
                 f"손익: {pnl:+,}원\n"
                 f"주의: 모의투자"
                 + CMD_FOOTER,
+            )
+            from trading.trade_journal import record_trade
+            record_trade(
+                ticker=ticker, name=name, side="sell",
+                quantity=qty, price=cp,
+                reason="CASH 전량 청산",
+                strategy="",
+                mock=True,
+                buy_price=bp,
+                buy_time=pos.get("buy_time", ""),
+                pnl=pnl,
             )
             if pnl < 0:
                 record_loss_and_stoploss(abs(pnl))
@@ -550,6 +572,17 @@ def check_eod_liquidation() -> None:
                 f"⏰ 데이트레이딩 당일 청산 원칙\n"
                 f"⚠️ 모의투자 — 실제 돈은 사용되지 않았습니다"
                 + CMD_FOOTER,
+            )
+            from trading.trade_journal import record_trade
+            record_trade(
+                ticker=ticker, name=name, side="sell",
+                quantity=qty, price=cp,
+                reason="EOD 장마감 청산",
+                strategy="",
+                mock=True,
+                buy_price=bp,
+                buy_time=pos.get("buy_time", ""),
+                pnl=pnl,
             )
             # 손실 기록
             if pnl < 0:

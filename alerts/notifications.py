@@ -257,6 +257,22 @@ def send_daily_report() -> None:
         portfolio_data={"positions": positions, "monthly_loss": monthly},
         market_data={"indices": fetch_index_prices()},
     )
-    msg = f"📋 [일일 마감 리포트]\n━━━━━━━━━━━━━━━━━━━━━━━\n{report}" + CMD_FOOTER
+
+    # 매매일지 요약 추가
+    journal_block = ""
+    try:
+        from trading.trade_journal import get_daily_summary
+        js = get_daily_summary()
+        if js["trades"] > 0:
+            wr = f"{js['win_rate']:.0f}%" if js["sells"] > 0 else "-"
+            journal_block = (
+                f"\n\n📒 [매매일지 요약]\n"
+                f"매수 {js['buys']}건 / 매도 {js['sells']}건\n"
+                f"손익: {js['pnl']:+,}원 / 승률: {wr}"
+            )
+    except Exception:
+        pass
+
+    msg = f"📋 [일일 마감 리포트]\n━━━━━━━━━━━━━━━━━━━━━━━\n{report}{journal_block}" + CMD_FOOTER
     TelegramNotifier().broadcast(msg)
     logger.info("일일 리포트 전송 완료")

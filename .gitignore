@@ -10,3 +10,4 @@ logs/
 .vscode/
 data/macro_override.json
 .claude/settings.local.json
+data/trade_journal.csv

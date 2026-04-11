@@ -201,6 +201,16 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
                 "[가상매매] %s 1차 매수 체결 %d주 @%s (분할 1/2, 금액 %s)",
                 name, first_qty, f"{price:,}", f"{price * first_qty:,}",
             )
+            from trading.trade_journal import record_trade
+            record_trade(
+                ticker=ticker, name=name, side="buy",
+                quantity=first_qty, price=price,
+                reason=", ".join(signal.reasons[:2]),
+                strategy=signal.strategy_name if hasattr(signal, "strategy_name") else "",
+                mock=True,
+                exec_strength=float(stock.get("exec_strength", 0)),
+                ai_decision=ai_decision,
+            )
             notifier.send_to_users(
                 [get_admin_id()],
                 f"🛒 [가상 매수 1차] {name} ({ticker})\n"
@@ -269,6 +279,17 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
             logger.info(
                 "[가상매매] %s 매도 체결 %d주 @%s (손익 %s원)",
                 name, qty, f"{current_price:,}", f"{pnl:+,}",
+            )
+            from trading.trade_journal import record_trade
+            record_trade(
+                ticker=ticker, name=name, side="sell",
+                quantity=qty, price=current_price,
+                reason=", ".join(signal.reasons[:2]),
+                strategy=signal.strategy_name if hasattr(signal, "strategy_name") else "",
+                mock=True,
+                buy_price=buy_price,
+                buy_time=pos.get("buy_time", ""),
+                pnl=pnl,
             )
             notifier.send_to_users(
                 [get_admin_id()],
