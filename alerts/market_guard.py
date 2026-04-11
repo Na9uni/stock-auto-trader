@@ -168,7 +168,7 @@ def _is_market_crash() -> bool:
 
 
 def fetch_index_prices() -> dict:
-    """yfinance로 주요 지수 조회.
+    """지수 가격 조회. 키움 실시간 데이터 우선, yfinance 폴백.
 
     Returns:
         {
@@ -178,15 +178,41 @@ def fetch_index_prices() -> dict:
             "NASDAQ": {"price": float, "change_pct": float},
         }
     """
-    symbols = {
+    result: dict[str, dict] = {}
+
+    # 1차: kiwoom_data.json에서 실시간 데이터 (딜레이 0)
+    try:
+        from alerts.file_io import load_kiwoom_data
+        data = load_kiwoom_data()
+        if data:
+            # KOSPI ETF(069500)로 KOSPI 지수 대체
+            kospi_etf = data.get("stocks", {}).get("069500", {})
+            if kospi_etf.get("current_price", 0) > 0:
+                result["KOSPI"] = {
+                    "price": float(kospi_etf["current_price"]),
+                    "change_pct": float(kospi_etf.get("change_rate", 0)),
+                }
+            # KOSDAQ ETF(229200)로 KOSDAQ 지수 대체
+            kosdaq_etf = data.get("stocks", {}).get("229200", {})
+            if kosdaq_etf.get("current_price", 0) > 0:
+                result["KOSDAQ"] = {
+                    "price": float(kosdaq_etf["current_price"]),
+                    "change_pct": float(kosdaq_etf.get("change_rate", 0)),
+                }
+    except Exception as e:
+        logger.debug("[지수] 키움 데이터 실패, yfinance 폴백: %s", e)
+
+    # 2차: 부족한 지수는 yfinance로 보충 (US 지수는 항상 yfinance)
+    yf_symbols = {
         "KOSPI": "^KS11",
         "KOSDAQ": "^KQ11",
         "S&P500": "^GSPC",
         "NASDAQ": "^IXIC",
     }
-    result: dict[str, dict] = {}
 
-    for label, symbol in symbols.items():
+    for label, symbol in yf_symbols.items():
+        if label in result:
+            continue  # 키움에서 이미 가져온 지수는 스킵
         try:
             ticker = yf.Ticker(symbol)
             hist = ticker.history(period="2d")
