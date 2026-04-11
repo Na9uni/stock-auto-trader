@@ -209,7 +209,10 @@ def check_signals() -> None:
     engine = get_regime_engine()
     index_data = fetch_index_prices()
     macro_status = assess_current()
-    regime = engine.detect(index_data, macro_status)
+
+    # ATR/전일고저 조기 감지용: KOSPI ETF(069500) 일봉 데이터 전달
+    kospi_candles = data.get("stocks", {}).get("069500", {}).get("candles_1d", [])
+    regime = engine.detect(index_data, macro_status, kospi_candles=kospi_candles)
     regime_params = engine.params
 
     # CASH: 전량 청산, 매매 금지

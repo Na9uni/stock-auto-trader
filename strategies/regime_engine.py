@@ -159,12 +159,18 @@ class RegimeEngine:
 
     # -- Main Detection --
 
-    def detect(self, index_data: dict, macro_status: object) -> RegimeState:
+    def detect(
+        self,
+        index_data: dict,
+        macro_status: object,
+        kospi_candles: list[dict] | None = None,
+    ) -> RegimeState:
         """메인 레짐 판별. check_signals()에서 호출.
 
         Args:
             index_data: {"KOSPI": {"price": float, "change_pct": float}, ...}
             macro_status: MacroStatus from assess_current()
+            kospi_candles: KOSPI ETF(069500) 일봉 리스트 (ATR/전일고저 조기 감지용)
 
         Returns:
             현재 레짐 상태
@@ -267,6 +273,40 @@ class RegimeEngine:
         elif worst_us_change <= -3.0 and new_state == RegimeState.NORMAL:
             new_state = RegimeState.SWING
             reason = f"US 야간 급락 (S&P/NASDAQ {worst_us_change:+.1f}%)"
+
+        # ── 조기 감지: ATR 급팽창 + 전일 저점 이탈 ──
+        if kospi_candles and len(kospi_candles) >= 10 and new_state == RegimeState.NORMAL:
+            try:
+                import pandas as pd
+                _cdf = pd.DataFrame(kospi_candles)
+                for _col in ("open", "high", "low", "close"):
+                    _cdf[_col] = pd.to_numeric(_cdf[_col], errors="coerce")
+                _cdf = _cdf.dropna(subset=["high", "low", "close"])
+                if len(_cdf) >= 10:
+                    # ATR 급팽창: 당일 ATR vs 10일 평균 ATR
+                    _ranges = _cdf["high"] - _cdf["low"]
+                    _atr_10 = float(_ranges.iloc[-11:-1].mean())  # 전일까지 10일 평균
+                    _atr_today = float(_ranges.iloc[-1])           # 당일 range
+                    _atr_ratio = _atr_today / _atr_10 if _atr_10 > 0 else 1.0
+
+                    # ATR 2배 이상 팽창 → SWING (변동성 급증 = 레짐 변화 전조)
+                    if _atr_ratio >= 2.5 and new_state == RegimeState.NORMAL:
+                        new_state = RegimeState.DEFENSE
+                        reason = f"ATR 급팽창 {_atr_ratio:.1f}배 (기준: 2.5배)"
+                    elif _atr_ratio >= 1.8 and new_state == RegimeState.NORMAL:
+                        new_state = RegimeState.SWING
+                        reason = f"ATR 팽창 {_atr_ratio:.1f}배 (기준: 1.8배)"
+
+                    # 전일 저점 이탈: 당일 종가가 전일 저점 아래 → SWING
+                    if len(_cdf) >= 2 and new_state == RegimeState.NORMAL:
+                        _prev_low = float(_cdf["low"].iloc[-2])
+                        _today_close = float(_cdf["close"].iloc[-1])
+                        if _prev_low > 0 and _today_close < _prev_low:
+                            _break_pct = (_today_close - _prev_low) / _prev_low * 100
+                            new_state = RegimeState.SWING
+                            reason = f"전일 저점 이탈 ({_today_close:,.0f} < {_prev_low:,.0f}, {_break_pct:+.1f}%)"
+            except Exception as e:
+                logger.debug("[레짐] ATR/전일고저 계산 실패 (무시): %s", e)
 
         # SWING 조건 (DEFENSE/CASH가 아닐 때만)
         if new_state == RegimeState.NORMAL:
