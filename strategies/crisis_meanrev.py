@@ -13,9 +13,94 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import logging
+
 import numpy as np
 import pandas as pd
 import yfinance as yf
+
+from config.trading_config import TradingConfig
+from strategies.base import MarketContext, SignalResult, SignalStrength, SignalType
+
+logger = logging.getLogger("stock_analysis")
+
+
+class CrisisMeanRevStrategy:
+    """위기장 평균회귀 전략 — Strategy Protocol 구현.
+
+    일봉 RSI(2) < 15 + 당일 -2% 하락 + 반등 확인 시 BUY.
+    ETF 전용으로 AUTO 하락장 모드에서 2차 신호로 사용.
+    """
+
+    name = "crisis_meanrev"
+
+    def __init__(self, config: TradingConfig):
+        self._config = config
+        self._rsi_entry: float = 15
+        self._drop_threshold: float = -2.0
+
+    def evaluate(self, ctx: MarketContext) -> SignalResult:
+        """일봉 RSI(2) 기반 위기 평균회귀 신호 판단."""
+        neutral = SignalResult(
+            signal_type=SignalType.NEUTRAL,
+            strength=SignalStrength.WEAK,
+            reasons=["[위기MR] 조건 미충족"],
+            strategy_name=self.name,
+        )
+
+        candles = ctx.candles_1d_raw
+        if not candles or len(candles) < 6:
+            neutral.reasons = ["[위기MR] 일봉 데이터 부족"]
+            return neutral
+
+        df = pd.DataFrame(candles)
+        for col in ("open", "high", "low", "close"):
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        sort_col = None
+        for candidate in ("datetime", "date", "Date"):
+            if candidate in df.columns:
+                sort_col = candidate
+                break
+        if sort_col is not None:
+            df = df.sort_values(sort_col).reset_index(drop=True)
+
+        # RSI(2) 계산
+        df["rsi2"] = rsi_2(df["close"])
+        df["change_pct"] = df["close"].pct_change() * 100
+
+        today = df.iloc[-1]
+        prev = df.iloc[-2]
+
+        today_rsi2 = float(today["rsi2"]) if not pd.isna(today["rsi2"]) else 50
+        prev_rsi2 = float(prev["rsi2"]) if not pd.isna(prev["rsi2"]) else 50
+        today_change = float(today["change_pct"]) if not pd.isna(today["change_pct"]) else 0
+
+        # 조건 1: RSI(2) < 15 (과매도)
+        oversold = today_rsi2 < self._rsi_entry
+        # 조건 2: 당일 -2% 이하 하락
+        drop = today_change <= self._drop_threshold
+        # 조건 3: 반등 확인 (전일 RSI<10 & 오늘 반등, 또는 RSI<5 극단)
+        bounce = (prev_rsi2 < 10 and today_rsi2 > prev_rsi2) or today_rsi2 < 5
+
+        if oversold and drop and bounce:
+            logger.info(
+                "[위기MR] %s 매수 신호: RSI2=%.0f(전일%.0f), 등락=%.1f%%",
+                ctx.name, today_rsi2, prev_rsi2, today_change,
+            )
+            return SignalResult(
+                signal_type=SignalType.BUY,
+                strength=SignalStrength.MEDIUM,
+                reasons=[
+                    f"RSI2={today_rsi2:.0f}(전일{prev_rsi2:.0f})",
+                    f"등락={today_change:+.1f}%",
+                    "반등 확인",
+                ],
+                strategy_name=self.name,
+            )
+
+        return neutral
 
 
 def rsi_2(prices: pd.Series) -> pd.Series:

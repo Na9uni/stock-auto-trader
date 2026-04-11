@@ -13,7 +13,7 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from alerts.signal_detector import SignalStrength
+from strategies.base import SignalStrength
 from alerts.telegram_notifier import TelegramNotifier
 
 from alerts._state import (

@@ -14,7 +14,7 @@ from alerts.file_io import (
     load_auto_positions,
     load_monthly_loss,
 )
-from alerts.signal_detector import SignalType, SignalStrength, SignalResult
+from strategies.base import SignalType, SignalStrength, SignalResult
 from alerts.telegram_notifier import TelegramNotifier
 
 logger = logging.getLogger("stock_analysis")

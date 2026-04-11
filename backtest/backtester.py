@@ -5,7 +5,8 @@ import numpy as np
 from datetime import datetime, timedelta
 from pathlib import Path
 from analysis.indicators import TechnicalIndicators
-from alerts.signal_detector import detect, detect_daily, SignalType, SignalStrength
+from alerts.signal_detector import detect, detect_daily
+from strategies.base import SignalType, SignalStrength
 
 ROOT = Path(__file__).parent.parent
 

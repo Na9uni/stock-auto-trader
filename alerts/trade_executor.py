@@ -18,7 +18,7 @@ from alerts.market_guard import (
     _is_market_crash,
 )
 from alerts.notifications import get_admin_id, CMD_FOOTER
-from alerts.signal_detector import SignalType, SignalStrength, SignalResult
+from strategies.base import SignalType, SignalStrength, SignalResult
 from config.whitelist import is_whitelisted
 
 logger = logging.getLogger("stock_analysis")

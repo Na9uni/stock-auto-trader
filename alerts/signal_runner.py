@@ -1,7 +1,8 @@
-"""신호 감지 — 단일 종목 래퍼 + 전략별 메인 루프 + 급등락/목표가 감시.
+"""신호 감지 — 공통 헬퍼 + 단일 루프 메인 + 급등락/목표가 감시.
 
 Functions:
-    _run_signal_for_stock  : 단일 종목 5분봉 신호 → AI → 매매
+    _build_market_context  : 공통 MarketContext 생성
+    _process_signal        : 신호 처리 (알림 + AI + 매매)
     check_signals          : 1분마다 화이트리스트 종목 신호 감지
     check_interest_spikes  : 1분마다 급등락 감지
     check_targets          : 1분마다 목표가/손절가 감시
@@ -14,12 +15,9 @@ from datetime import datetime
 
 import pandas as pd
 
-from alerts.signal_detector import SignalType, SignalStrength, SignalResult
 from alerts.telegram_notifier import TelegramNotifier
 from config.whitelist import is_whitelisted
-from strategies.base import MarketContext
-from strategies.base import SignalType as StratSignalType
-from strategies.base import SignalStrength as StratSignalStrength
+from strategies.base import MarketContext, SignalResult, SignalType, SignalStrength
 
 from alerts._state import (
     _TRADING_CONFIG,
@@ -62,99 +60,142 @@ from alerts.crisis_manager import (
 
 
 # ---------------------------------------------------------------------------
-# 신호 감지 래퍼
+# 공통 헬퍼
 # ---------------------------------------------------------------------------
 
-def _run_signal_for_stock(ticker: str, name: str, stock: dict,
-                          notifier, ai) -> None:
-    """단일 종목 5분봉 신호 감지 → AI 분석 → 판단 기반 매매."""
-    from alerts.signal_detector import detect
+def _build_market_context(
+    ticker: str, name: str, info: dict, now: datetime,
+) -> MarketContext | None:
+    """공통 MarketContext 생성. 데이터 부족 시 None 반환."""
+    candles_1d = info.get("candles_1d", [])
+    if len(candles_1d) < 12:
+        return None
 
-    df = candles_to_df(stock.get("candles_1m", []))
-    df_ind = calc_indicators(df)
-    if df_ind is None:
+    current_price = int(info.get("current_price", 0))
+    if current_price == 0:
+        return None
+
+    # 5분봉 DataFrame (거부권 체크용)
+    # 주의: kiwoom_data.json의 "candles_1m" 키는 실제로 5분봉 데이터
+    # (키 이름이 1m이지만 opt10080 = 5분봉 조회 결과)
+    df_5m = candles_to_df(info.get("candles_1m", []))
+    df_5m_ind = calc_indicators(df_5m)
+
+    # combo/auto: 거부권용 5분봉 (20봉 이상 필요)
+    # 그 외: 거부권 불필요 → 빈 DataFrame으로 통과
+    candles_5m_for_veto = pd.DataFrame()
+    if _STRATEGY.name in ("combo", "auto", "score_veto"):
+        if df_5m_ind is not None and len(df_5m_ind) > 20:
+            candles_5m_for_veto = df_5m_ind.iloc[:-1].copy()
+
+    # 장중 고가: 당일 세션 5분봉 high 최대값만 사용
+    intraday_high = 0
+    if df_5m is not None and not df_5m.empty and "high" in df_5m.columns:
+        today_str = now.strftime("%Y%m%d")
+        if "date" in df_5m.columns:
+            # candles_to_df가 date를 datetime으로 변환하므로 양쪽 형식 모두 대응
+            date_col = df_5m["date"].astype(str)
+            # "2026-04-03 09:05:00" → "20260403" 또는 "20260403" 그대로
+            today_bars = df_5m[
+                date_col.str.replace("-", "").str.replace(" ", "").str[:8] == today_str
+            ]
+            if not today_bars.empty:
+                intraday_high = int(today_bars["high"].max())
+        # 날짜 필터 실패 시 intraday_high=0 유지 (이전 세션 고가로 false breakout 방지)
+
+    return MarketContext(
+        ticker=ticker,
+        name=name,
+        current_price=current_price,
+        change_rate=float(info.get("change_rate") or 0.0),
+        candles_5m=candles_5m_for_veto,
+        candles_1d=pd.DataFrame(),
+        exec_strength=float(info.get("exec_strength", 0.0)),
+        orderbook=info.get("orderbook"),
+        intraday_high=intraday_high,
+        candles_1d_raw=candles_1d,
+    )
+
+
+def _process_signal(
+    ticker: str, name: str, info: dict,
+    signal: SignalResult, notifier, ai, now: datetime,
+) -> None:
+    """신호 처리: 알림 + AI + 매매 (BUY/SELL 공통)."""
+    if signal.signal_type == SignalType.NEUTRAL:
+        return
+    if signal.strength != SignalStrength.STRONG:
         return
 
-    exec_strength = stock.get("exec_strength", 0.0)
-    try:
-        change_rate = float(stock.get("change_rate") or 0.0)
-    except (ValueError, TypeError):
-        change_rate = 0.0
-    orderbook = stock.get("orderbook")
-    signal = detect(df_ind, exec_strength=exec_strength, change_rate=change_rate, orderbook=orderbook)
-
-    if signal.signal_type == SignalType.NEUTRAL or signal.strength != SignalStrength.STRONG:
-        logger.debug("%s: 신호 강도 부족 (strength=%s, score=%d)", name, signal.strength.name, signal.score)
-        return
-
-    # 일봉 추세 게이트: MA20 상승 + RSI 35~65
+    # 매수 시간 제한
     if signal.signal_type == SignalType.BUY:
-        daily_candles = stock.get("candles_1d", [])
-        if len(daily_candles) >= 25:
-            df_daily = candles_to_df(daily_candles)
-            df_daily_ind = calc_indicators(df_daily)
-            if df_daily_ind is not None:
-                last_daily = df_daily_ind.iloc[-1]
-                daily_ma20 = last_daily.get("ma20", 0)
-                prev_daily_ma20 = df_daily_ind.iloc[-5].get("ma20", 0) if len(df_daily_ind) >= 5 else 0
-                daily_rsi = last_daily.get("rsi", 50)
-                # MA20 하락 중이면 매수 차단
-                if daily_ma20 > 0 and prev_daily_ma20 > 0 and daily_ma20 < prev_daily_ma20:
-                    logger.debug("[일봉 필터] %s MA20 하락 중 → 매수 보류", name)
-                    return
-                # RSI 극단값이면 차단
-                if daily_rsi > 75 or daily_rsi < 25:
-                    logger.debug("[일봉 필터] %s 일봉 RSI %.0f 극단값 → 매수 보류", name, daily_rsi)
-                    return
-
-    # 매도 신호는 보유 종목에만
-    if signal.signal_type == SignalType.SELL:
-        positions = load_auto_positions()
-        if ticker not in positions:
+        if now.hour >= _TRADING_CONFIG.buy_end_hour:
+            return
+        if now.hour == 9 and now.minute < _TRADING_CONFIG.buy_start_minute:
             return
 
-    if not cooldown_ok(ticker, signal.signal_type, signal.strength):
+    # 쿨다운
+    ck = f"{_STRATEGY.name}_{ticker}"
+    if not cooldown_ok(ck, signal.signal_type, signal.strength):
         return
 
     # AI 분석 (매수 신호만)
     ai_decision = ""
     ai_text = ""
     if signal.signal_type == SignalType.BUY:
-        warn_text = signal.warnings if hasattr(signal, "warnings") else []
+        # 5분봉 지표에서 RSI/MACD/거래량 추출 (VB 등 일봉 전략은 자체 값 없으므로)
+        _sig_rsi = signal.rsi
+        _sig_macd = signal.macd_cross
+        _sig_vol = signal.vol_ratio
+        if pd.isna(_sig_rsi):
+            df_5m = candles_to_df(info.get("candles_1m", []))
+            df_5m_ind = calc_indicators(df_5m)
+            if df_5m_ind is not None and len(df_5m_ind) > 0:
+                _last = df_5m_ind.iloc[-1]
+                _sig_rsi = float(_last.get("rsi", float("nan")))
+                _h = _last.get("macd_hist", None)
+                _ph = (
+                    df_5m_ind.iloc[-2].get("macd_hist", None)
+                    if len(df_5m_ind) > 1 else None
+                )
+                if _h is not None and _ph is not None:
+                    _sig_macd = (
+                        "golden" if _ph < 0 and _h >= 0
+                        else ("dead" if _ph > 0 and _h <= 0 else None)
+                    )
+
         ai_result = ai.quick_signal_alert(
             ticker=ticker, name=name,
-            price=stock.get("current_price", 0),
-            change_rate=stock.get("change_rate", 0),
+            price=int(info.get("current_price", 0)),
+            change_rate=info.get("change_rate", 0),
             signal_reasons=signal.reasons,
-            rsi=signal.rsi, macd_cross=signal.macd_cross,
-            vol_ratio=signal.vol_ratio,
-            recent_candles=stock.get("candles_1m", [])[:5],
-            orderbook=stock.get("orderbook"),
-            exec_strength=exec_strength, warnings=warn_text,
+            rsi=_sig_rsi, macd_cross=_sig_macd,
+            vol_ratio=_sig_vol,
         )
         ai_decision = ai_result.get("decision", "")
         ai_text = ai_result.get("text", "")
 
-    header = build_signal_header(ticker, name, signal, stock)
-    ai_block = f"\n[Sonnet AI 분석]\n{ai_text}\n" if ai_text else ""
+    # 알림
+    header = build_signal_header(ticker, name, signal, info)
+    ai_block = f"\n[AI 분석]\n{ai_text}\n" if ai_text else ""
     full_msg = header + ai_block + CMD_FOOTER
 
     target_ids = get_users_for_ticker(ticker)
     ok = notifier.send_to_users(target_ids, full_msg)
     if ok:
-        # 매수 시간 밖이면 쿨다운 기록 안 함 (다음 유효 시간에 재평가)
-        now_check = datetime.now()
-        in_buy_window = not (now_check.hour == 9 and now_check.minute < _TRADING_CONFIG.buy_start_minute)
+        # 매수 시간 전(09:00~09:09)이면 쿨다운 안 걸어서 시작 시간에 재시도
+        in_buy_window = not (now.hour == 9 and now.minute < _TRADING_CONFIG.buy_start_minute)
         if in_buy_window or signal.signal_type != SignalType.BUY:
-            update_cooldown(ticker, signal.signal_type)
+            update_cooldown(ck, signal.signal_type)
         save_last_signal(ticker, name)
         logger.info(
-            "[%s] %s %s 알림 전송 (%d명, score=%d, AI판단=%s)",
+            "[%s] %s %s 알림 전송 (score=%.0f, AI판단=%s)",
             signal.strength.name, name, signal.signal_type.value,
-            len(target_ids), signal.score, ai_decision or "실패",
+            signal.score, ai_decision or "없음",
         )
 
-    _auto_trade(ticker, name, signal, stock, notifier, ai_decision)
+    # 자동매매
+    _auto_trade(ticker, name, signal, info, notifier, ai_decision)
 
 
 # ---------------------------------------------------------------------------
@@ -236,251 +277,25 @@ def check_signals() -> None:
         logger.warning("[수집기 사망] 신규 매수 전면 차단")
         return
 
-    # ── 변동성 돌파 / 콤보 전략: 매분 체크 ──
-    if _STRATEGY.name in ("volatility_breakout", "combo", "auto"):
-      for ticker, info in data.get("stocks", {}).items():
+    # ── score_veto: 5분봉 경계에서만 실행 ──
+    if _STRATEGY.name == "score_veto" and now.minute % 5 != 0:
+        return
+
+    # ── 전략 평가: 단일 루프 ──
+    for ticker, info in data.get("stocks", {}).items():
         try:
-            current_price = int(info.get("current_price", 0))
-            if current_price == 0:
-                continue
             if not is_whitelisted(ticker):
                 continue
             name = info.get("name", ticker)
 
-            # 변동성 돌파 신호 감지
-            candles_1d = info.get("candles_1d", [])
-            if len(candles_1d) < 12:
+            ctx = _build_market_context(ticker, name, info, now)
+            if ctx is None:
                 continue
 
-            # 5분봉 DataFrame (거부권 체크용)
-            # 주의: kiwoom_data.json의 "candles_1m" 키는 실제로 5분봉 데이터
-            # (키 이름이 1m이지만 opt10080 = 5분봉 조회 결과)
-            df_5m = candles_to_df(info.get("candles_1m", []))
-            df_5m_ind = calc_indicators(df_5m)
-
-            # combo: 거부권용 5분봉 (20봉 이상 필요)
-            # VB 전용 모드: 거부권 불필요 → 빈 DataFrame으로 통과
-            if _STRATEGY.name in ("combo", "auto"):
-                if df_5m_ind is not None and len(df_5m_ind) > 20:
-                    candles_5m_for_veto = df_5m_ind.iloc[:-1].copy()
-                else:
-                    candles_5m_for_veto = pd.DataFrame()  # 데이터 부족 시 거부권 없이 진행
-            else:
-                candles_5m_for_veto = pd.DataFrame()  # VB 전용: 거부권 안 씀
-
-            # 장중 고가: 당일 세션 5분봉 high 최대값만 사용
-            intraday_high = 0
-            if df_5m is not None and not df_5m.empty and "high" in df_5m.columns:
-                today_str = now.strftime("%Y%m%d")
-                if "date" in df_5m.columns:
-                    # candles_to_df가 date를 datetime으로 변환하므로 양쪽 형식 모두 대응
-                    date_col = df_5m["date"].astype(str)
-                    # "2026-04-03 09:05:00" → "20260403" 또는 "20260403" 그대로
-                    today_bars = df_5m[date_col.str.replace("-", "").str.replace(" ", "").str[:8] == today_str]
-                    if not today_bars.empty:
-                        intraday_high = int(today_bars["high"].max())
-                # 날짜 필터 실패 시 intraday_high=0 유지 (이전 세션 고가로 false breakout 방지)
-
-            ctx = MarketContext(
-                ticker=ticker,
-                name=name,
-                current_price=current_price,
-                change_rate=float(info.get("change_rate") or 0.0),
-                candles_5m=candles_5m_for_veto,
-                candles_1d=pd.DataFrame(),
-                exec_strength=float(info.get("exec_strength", 0.0)),
-                orderbook=info.get("orderbook"),
-                intraday_high=intraday_high,
-                candles_1d_raw=candles_1d,
-            )
-
-            vb_signal = _STRATEGY.evaluate(ctx)
-
-            if (vb_signal.signal_type == StratSignalType.BUY
-                    and vb_signal.strength == StratSignalStrength.STRONG):
-                # VB 전용 시간 제한
-                if now.hour >= _TRADING_CONFIG.buy_end_hour:
-                    continue
-                # 쿨다운 체크
-                ck_vb = f"vb_{ticker}"
-                if not cooldown_ok(ck_vb, SignalType.BUY, SignalStrength.STRONG):
-                    continue
-
-                # AI 판단
-                ai_decision = ""
-                ai_text = ""
-                # 5분봉 지표에서 RSI/MACD/거래량 추출 (VB 신호에는 없으므로)
-                _vb_rsi = float("nan")
-                _vb_macd = None
-                _vb_vol = float("nan")
-                if df_5m_ind is not None and len(df_5m_ind) > 0:
-                    _last = df_5m_ind.iloc[-1]
-                    _vb_rsi = float(_last.get("rsi", float("nan")))
-                    _h = _last.get("macd_hist", None)
-                    _ph = df_5m_ind.iloc[-2].get("macd_hist", None) if len(df_5m_ind) > 1 else None
-                    if _h is not None and _ph is not None:
-                        _vb_macd = "golden" if _ph < 0 and _h >= 0 else ("dead" if _ph > 0 and _h <= 0 else None)
-                ai_result = ai.quick_signal_alert(
-                    ticker=ticker, name=name,
-                    price=current_price,
-                    change_rate=info.get("change_rate", 0),
-                    signal_reasons=vb_signal.reasons,
-                    rsi=_vb_rsi, macd_cross=_vb_macd,
-                    vol_ratio=_vb_vol,
-                )
-                ai_decision = ai_result.get("decision", "")
-                ai_text = ai_result.get("text", "")
-
-                # 알림
-                target_str = f"{vb_signal.target_price:,}" if vb_signal.target_price else "N/A"
-                header = (
-                    f"🚀 [변동성 돌파] {name} ({ticker})\n"
-                    f"💰 현재가: {current_price:,}원 / 목표가: {target_str}원\n"
-                    f"📈 {', '.join(vb_signal.reasons[:3])}"
-                )
-                ai_block = f"\n[AI 분석]\n{ai_text}\n" if ai_text else ""
-                full_msg = header + ai_block + CMD_FOOTER
-                target_ids = get_users_for_ticker(ticker)
-                ok = notifier.send_to_users(target_ids, full_msg)
-                if ok:
-                    # 매수 시간 전(09:00~09:09)이면 쿨다운 안 걸어서 09:10에 재시도
-                    if not (now.hour == 9 and now.minute < _TRADING_CONFIG.buy_start_minute):
-                        update_cooldown(ck_vb, SignalType.BUY)
-                    save_last_signal(ticker, name)
-
-                # 자동매매 (SignalResult 변환)
-                compat_signal = SignalResult(
-                    signal_type=SignalType.BUY,
-                    strength=SignalStrength.STRONG,
-                    score=int(vb_signal.score),
-                    reasons=vb_signal.reasons,
-                    rsi=vb_signal.rsi,
-                    macd_cross=vb_signal.macd_cross,
-                    vol_ratio=vb_signal.vol_ratio,
-                )
-                _auto_trade(ticker, name, compat_signal, info, notifier, ai_decision)
-
-            # AUTO 하락장 모드: 데드크로스 매도 신호 처리
-            elif (vb_signal.signal_type == StratSignalType.SELL
-                    and vb_signal.strength == StratSignalStrength.STRONG
-                    and _STRATEGY.name == "auto"):
-                ck_sell = f"trend_sell_{ticker}"
-                if not cooldown_ok(ck_sell, SignalType.SELL, SignalStrength.STRONG):
-                    continue
-
-                header = (
-                    f"📉 [추세추종 데드크로스] {name} ({ticker})\n"
-                    f"💰 현재가: {current_price:,}원\n"
-                    f"📊 {', '.join(vb_signal.reasons[:3])}"
-                )
-                full_msg = header + CMD_FOOTER
-                target_ids = get_users_for_ticker(ticker)
-                ok = notifier.send_to_users(target_ids, full_msg)
-                if ok:
-                    update_cooldown(ck_sell, SignalType.SELL)
-
-                # 자동매도 (보유 중이면)
-                compat_signal = SignalResult(
-                    signal_type=SignalType.SELL,
-                    strength=SignalStrength.STRONG,
-                    score=int(vb_signal.score),
-                    reasons=vb_signal.reasons,
-                )
-                _auto_trade(ticker, name, compat_signal, info, notifier, "")
-
+            signal = _STRATEGY.evaluate(ctx)
+            _process_signal(ticker, name, info, signal, notifier, ai, now)
         except Exception as e:
-            logger.error("[변동성돌파] %s 에러: %s", ticker, e)
-
-    # ── 추세추종 전략: strategy=trend일 때 매분 체크 ──
-    if _STRATEGY.name == "trend_following":
-      for ticker, info in data.get("stocks", {}).items():
-        try:
-            current_price = int(info.get("current_price", 0))
-            if current_price == 0:
-                continue
-            if not is_whitelisted(ticker):
-                continue
-            name = info.get("name", ticker)
-
-            candles_1d = info.get("candles_1d", [])
-            if len(candles_1d) < 61:
-                continue
-
-            ctx = MarketContext(
-                ticker=ticker,
-                name=name,
-                current_price=current_price,
-                change_rate=float(info.get("change_rate") or 0.0),
-                candles_5m=pd.DataFrame(),
-                candles_1d=pd.DataFrame(),
-                exec_strength=float(info.get("exec_strength", 0.0)),
-                orderbook=info.get("orderbook"),
-                intraday_high=0,
-                candles_1d_raw=candles_1d,
-            )
-
-            trend_signal = _STRATEGY.evaluate(ctx)
-
-            # 매수 신호
-            if (trend_signal.signal_type == StratSignalType.BUY
-                    and trend_signal.strength == StratSignalStrength.STRONG):
-                if now.hour >= _TRADING_CONFIG.buy_end_hour:
-                    continue
-                ck_trend = f"trend_{ticker}"
-                if not cooldown_ok(ck_trend, SignalType.BUY, SignalStrength.STRONG):
-                    continue
-
-                header = (
-                    f"📈 [추세추종 골든크로스] {name} ({ticker})\n"
-                    f"💰 현재가: {current_price:,}원\n"
-                    f"📊 {', '.join(trend_signal.reasons[:3])}"
-                )
-                full_msg = header + CMD_FOOTER
-                target_ids = get_users_for_ticker(ticker)
-                ok = notifier.send_to_users(target_ids, full_msg)
-                if ok:
-                    if not (now.hour == 9 and now.minute < _TRADING_CONFIG.buy_start_minute):
-                        update_cooldown(ck_trend, SignalType.BUY)
-                    save_last_signal(ticker, name)
-
-                compat_signal = SignalResult(
-                    signal_type=SignalType.BUY,
-                    strength=SignalStrength.STRONG,
-                    score=int(trend_signal.score),
-                    reasons=trend_signal.reasons,
-                )
-                _auto_trade(ticker, name, compat_signal, info, notifier, "")
-
-            # 매도 신호
-            elif (trend_signal.signal_type == StratSignalType.SELL
-                    and trend_signal.strength == StratSignalStrength.STRONG):
-                header = (
-                    f"📉 [추세추종 데드크로스] {name} ({ticker})\n"
-                    f"💰 현재가: {current_price:,}원\n"
-                    f"📊 {', '.join(trend_signal.reasons[:3])}"
-                )
-                full_msg = header + CMD_FOOTER
-                target_ids = get_users_for_ticker(ticker)
-                notifier.send_to_users(target_ids, full_msg)
-
-        except Exception as e:
-            logger.error("[추세추종] %s 에러: %s", ticker, e)
-
-    # ── 합산 전략: strategy=score일 때만 + 5분 봉 경계에서만 ──
-    if _STRATEGY.name == "score_veto":
-        if now.minute % 5 != 0:
-            return
-
-        for ticker, info in data.get("stocks", {}).items():
-            try:
-                if info.get("current_price", 0) == 0:
-                    continue
-                if not is_whitelisted(ticker):
-                    continue
-                name = info.get("name", ticker)
-                _run_signal_for_stock(ticker, name, info, notifier, ai)
-            except Exception as e:
-                logger.error("[신호감지] %s 에러: %s", ticker, e)
+            logger.error("[신호감지] %s 에러: %s", ticker, e)
 
 
 # ---------------------------------------------------------------------------

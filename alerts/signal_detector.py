@@ -6,45 +6,12 @@ signal_detector.py
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from enum import Enum
-
 import numpy as np
 import pandas as pd
 
+from strategies.base import SignalResult, SignalType, SignalStrength
+
 logger = logging.getLogger("stock_analysis")
-
-
-# ---------------------------------------------------------------------------
-# Enums
-# ---------------------------------------------------------------------------
-
-class SignalType(Enum):
-    BUY = "buy"
-    SELL = "sell"
-    NEUTRAL = "neutral"
-
-
-class SignalStrength(Enum):
-    STRONG = "strong"
-    MEDIUM = "medium"
-    WEAK = "weak"
-
-
-# ---------------------------------------------------------------------------
-# Data class
-# ---------------------------------------------------------------------------
-
-@dataclass
-class SignalResult:
-    signal_type: SignalType
-    strength: SignalStrength
-    score: int
-    reasons: list[str] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
-    rsi: float = float("nan")
-    macd_cross: str | None = None   # "golden" / "dead" / None
-    vol_ratio: float = float("nan")
 
 
 # ---------------------------------------------------------------------------

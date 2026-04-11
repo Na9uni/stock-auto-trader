@@ -19,7 +19,7 @@ import time
 
 import schedule
 
-from alerts.signal_detector import SignalStrength
+from strategies.base import SignalStrength
 from alerts.telegram_notifier import TelegramNotifier
 
 # ---------------------------------------------------------------------------
@@ -123,7 +123,6 @@ from alerts.notifications import (                   # noqa: F401
 # ---------------------------------------------------------------------------
 
 from alerts.signal_runner import (                   # noqa: F401
-    _run_signal_for_stock,
     check_signals,
     check_interest_spikes,
     check_targets,

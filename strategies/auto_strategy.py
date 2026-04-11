@@ -15,6 +15,7 @@ from strategies.base import MarketContext, SignalResult, SignalStrength, SignalT
 from strategies.vb_strategy import VBStrategy
 from strategies.score_strategy import ScoreStrategy, VETO_THRESHOLD
 from strategies.trend_strategy import TrendStrategy
+from strategies.crisis_meanrev import CrisisMeanRevStrategy
 
 logger = logging.getLogger("stock_analysis")
 
@@ -26,10 +27,11 @@ class AutoStrategy:
 
     def __init__(self, config: TradingConfig):
         self._config = config
-        # 두 전략을 모두 준비
+        # 모든 전략을 준비
         self._vb = VBStrategy(config)
         self._score = ScoreStrategy(config)
         self._trend = TrendStrategy(config)
+        self._crisis_mr = CrisisMeanRevStrategy(config)
 
     def _detect_regime(self, ctx: MarketContext) -> str:
         """시장 레짐 판단: 상승장 / 하락장 / 급락.
@@ -150,10 +152,26 @@ class AutoStrategy:
             )
 
         elif regime == "bear":
-            # 하락장: 추세추종 (골든크로스만 매수)
+            # 하락장: 1차 추세추종 (골든크로스) + 2차 위기 평균회귀 (ETF만)
             trend_signal = self._trend.evaluate(ctx)
 
-            if trend_signal.signal_type != SignalType.NEUTRAL:
+            # 1차: 추세추종 BUY (골든크로스 감지)
+            if trend_signal.signal_type == SignalType.BUY:
+                trend_signal.reasons.insert(0, "[AUTO-하락장] 추세추종 모드")
+                trend_signal.strategy_name = self.name
+                return trend_signal
+
+            # 2차: 위기 평균회귀 (RSI2 급락 후 반등) — ETF만
+            from config.whitelist import is_etf
+            if is_etf(ctx.ticker):
+                mr_signal = self._crisis_mr.evaluate(ctx)
+                if mr_signal.signal_type == SignalType.BUY:
+                    mr_signal.reasons.insert(0, "[AUTO-하락장] 위기 평균회귀")
+                    mr_signal.strategy_name = self.name
+                    return mr_signal
+
+            # SELL 신호는 통과
+            if trend_signal.signal_type == SignalType.SELL:
                 trend_signal.reasons.insert(0, "[AUTO-하락장] 추세추종 모드")
                 trend_signal.strategy_name = self.name
                 return trend_signal

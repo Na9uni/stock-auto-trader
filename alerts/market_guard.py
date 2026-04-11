@@ -14,7 +14,7 @@ from alerts.file_io import (
     load_monthly_loss,
     save_monthly_loss,
 )
-from alerts.signal_detector import SignalType, SignalStrength
+from strategies.base import SignalType, SignalStrength
 
 logger = logging.getLogger("stock_analysis")
 
