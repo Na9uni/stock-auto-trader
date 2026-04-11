@@ -33,10 +33,13 @@ class VBStrategy:
         if not candles or len(candles) < 12:
             return self._neutral("데이터 부족")
 
-        # K값: ETF는 기본(0.5), 개별주는 높게(0.6)
-        # TODO: K값 walk-forward 검증 필요. 현재 ETF=0.5, 개별주=0.6은 경험적 값.
-        # backtest/optimize.py에서 그리드서치 가능하나 과적합 위험 있음.
-        k = self._config.vb_k if is_etf(ctx.ticker) else self._config.vb_k_individual
+        # K값: 종목별 최적값 우선, 없으면 ETF/개별주 기본값
+        from config.whitelist import get_ticker_k
+        ticker_k = get_ticker_k(ctx.ticker)
+        if ticker_k is not None:
+            k = ticker_k
+        else:
+            k = self._config.vb_k if is_etf(ctx.ticker) else self._config.vb_k_individual
 
         # 일봉 데이터 추출
         import pandas as pd

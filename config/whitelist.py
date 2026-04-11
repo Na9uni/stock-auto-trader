@@ -41,6 +41,23 @@ STOCK_WHITELIST: dict[str, str] = {
 # 전체 화이트리스트
 AUTO_TRADE_WHITELIST: dict[str, str] = {**ETF_WHITELIST, **STOCK_WHITELIST}
 
+# 종목별 최적 K값 (walk-forward 그리드서치 2021~2026 Sharpe 기준)
+# 여기에 없는 종목은 기본값 사용 (ETF: VB_K, 개별주: VB_K_INDIVIDUAL)
+TICKER_K_MAP: dict[str, float] = {
+    "229200": 0.6,   # KODEX 코스닥150
+    "131890": 0.3,   # ACE 삼성그룹동일가중 (Sharpe 1.35)
+    "108450": 0.3,   # ACE 삼성그룹섹터가중 (Sharpe 0.89)
+    "395160": 0.5,   # KODEX AI반도체 (Sharpe 1.53)
+    "005930": 0.6,   # 삼성전자 (Sharpe 0.89)
+    "261220": 0.5,   # KODEX WTI원유선물
+    "132030": 0.7,   # KODEX 골드선물 (Sharpe 0.75)
+}
+
+
+def get_ticker_k(ticker: str) -> float | None:
+    """종목별 최적 K값 반환. 없으면 None (기본값 사용)."""
+    return TICKER_K_MAP.get(ticker)
+
 # 대형주 일봉 임계값 완화 대상
 LARGECAP_DAILY_THRESHOLD: dict[str, str] = {
     "005930": "삼성전자",
