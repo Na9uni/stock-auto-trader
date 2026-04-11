@@ -92,7 +92,25 @@ class VBStrategy:
                 f"변동성 부족 (range={prev_range:,} < 0.5%)"
             )
 
-        # 3) 목표가 돌파 확인 (현재가 또는 당일 장중 고가)
+        # 3) 가격-RSI 다이버전스: 가격 신고가인데 RSI 하락 → 거짓 돌파 경고
+        if len(df) >= 15:
+            # 간단한 RSI(14) 계산
+            _delta = df["close"].diff()
+            _gain = _delta.clip(lower=0).rolling(14).mean()
+            _loss = (-_delta.clip(upper=0)).rolling(14).mean()
+            _rs = _gain / _loss.replace(0, float('nan'))
+            _rsi = 100 - (100 / (1 + _rs))
+
+            if len(_rsi) >= 11 and not pd.isna(_rsi.iloc[-2]) and not pd.isna(_rsi.iloc[-6]):
+                price_higher = float(df["high"].iloc[-2]) > float(df["high"].iloc[-6])
+                rsi_lower = float(_rsi.iloc[-2]) < float(_rsi.iloc[-6])
+
+                if price_higher and rsi_lower and float(_rsi.iloc[-2]) > 65:
+                    return self._neutral(
+                        f"베어리시 다이버전스 (가격 신고가 but RSI 하락 {_rsi.iloc[-2]:.0f})"
+                    )
+
+        # 4) 목표가 돌파 확인 (현재가 또는 당일 장중 고가)
         # 쿨다운이 중복 진입을 방지하므로 intraday_high 사용 가능
         check_price = max(ctx.current_price, ctx.intraday_high) if ctx.intraday_high > 0 else ctx.current_price
         if check_price >= target_price:
@@ -104,7 +122,32 @@ class VBStrategy:
                 if avg_vol > 0 and prev_vol < avg_vol * 0.5:
                     return self._neutral(f"거래량 부족 (전일 {prev_vol:,} < 평균 {avg_vol:,.0f}의 50%)")
 
-            # 4) 시간대별 신호 품질 필터
+            # 5) 체결강도 필터: 매수세 > 매도세 확인
+            # exec_strength: 100 = 매수/매도 동일, 100+ = 매수 우세, 100- = 매도 우세
+            if ctx.exec_strength > 0:  # 0이면 데이터 없음 → 스킵
+                if ctx.exec_strength < 100:
+                    return self._neutral(
+                        f"체결강도 부족 ({ctx.exec_strength:.0f}% < 100%)"
+                    )
+
+            # 6) 호가창 불균형: 매수 잔량 > 매도 잔량 확인
+            if ctx.orderbook:
+                try:
+                    bids = ctx.orderbook.get("bid", [])
+                    asks = ctx.orderbook.get("ask", [])
+                    if bids and asks:
+                        buy_qty = sum(b.get("qty", 0) for b in bids[:5])
+                        sell_qty = sum(a.get("qty", 0) for a in asks[:5])
+                        if sell_qty > 0:
+                            imbalance = buy_qty / sell_qty
+                            if imbalance < 0.7:  # 매도 잔량이 매수의 1.4배 이상
+                                return self._neutral(
+                                    f"호가 불균형 (매수/매도 비율 {imbalance:.1f}, 매도 우세)"
+                                )
+                except (ValueError, TypeError, KeyError):
+                    pass  # 호가 데이터 불완전 시 필터 스킵
+
+            # 7) 시간대별 신호 품질 필터
             # 09:10~09:30 초반 변동성 구간: 거짓 돌파 위험 → MEDIUM으로 강도 하향
             # 11:30~13:00 저유동성 구간: 거짓 돌파 위험 → MEDIUM으로 강도 하향
             # 나머지: STRONG (정상)

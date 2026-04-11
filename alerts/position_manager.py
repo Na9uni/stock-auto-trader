@@ -194,6 +194,42 @@ def check_auto_positions() -> None:
             pass
 
     for ticker, pos in list(positions.items()):
+        # 분할 매수 2차 진입: 현재가가 1차 매수가 이상이면 추가 매수
+        split_remaining = pos.get("split_remaining", 0)
+        if split_remaining > 0 and not pos.get("manual"):
+            name = pos.get("name", ticker)
+            current_price = int(all_stocks.get(ticker, {}).get("current_price", 0))
+            buy_price = pos.get("buy_price", 0)
+            split_price = pos.get("split_price", buy_price)
+            if current_price > 0 and current_price >= split_price:
+                # 2차 매수 실행
+                from alerts.trade_executor import OPERATION_MODE
+                if OPERATION_MODE == "MOCK":
+                    pos["qty"] = int(pos.get("qty", 0)) + split_remaining
+                    pos["buy_price"] = int((pos["buy_price"] * (pos["qty"] - split_remaining) + current_price * split_remaining) / pos["qty"])
+                    pos.pop("split_remaining", None)
+                    pos.pop("split_price", None)
+                    logger.info("[분할매수 2차] %s +%d주 @%s → 총 %d주", name, split_remaining, f"{current_price:,}", pos["qty"])
+                    try:
+                        notifier.send_to_users(
+                            [get_admin_id()],
+                            f"🛒 [가상 매수 2차] {name} ({ticker})\n"
+                            f"💰 추가: {split_remaining}주 / 가격: {current_price:,}원 (40%)\n"
+                            f"📊 평균단가: {pos['buy_price']:,}원 / 총 {pos['qty']}주\n"
+                            f"⚠️ 모의투자"
+                            + CMD_FOOTER,
+                        )
+                    except Exception:
+                        pass
+                    save_auto_positions(positions)
+            elif current_price > 0:
+                # 현재가가 1차 매수가 아래 → 2차 매수 취소
+                pos.pop("split_remaining", None)
+                pos.pop("split_price", None)
+                logger.info("[분할매수 취소] %s 현재가 %s < 1차매수가 %s → 2차 취소", name, f"{current_price:,}", f"{split_price:,}")
+                save_auto_positions(positions)
+            continue  # 분할매수 처리 후 나머지 손절/트레일링은 다음 사이클에서
+
         if pos.get("manual", False):
             # ── P1-9: manual 포지션도 비상 손절만 적용 (-15%) ──
             buy_price = pos.get("buy_price", 0)

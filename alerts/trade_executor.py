@@ -193,29 +193,34 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
         _buy_in_progress.add(ticker)
 
         if OPERATION_MODE == "MOCK":
-            # MOCK 모드: 실제 주문 안 보내고 가상 체결 알림
+            # 분할 매수: 1차 60% 즉시, 2차 40% 보류
+            first_qty = max(1, int(quantity * 0.6))
+            remaining_qty = quantity - first_qty
+
             logger.info(
-                "[가상매매] %s 매수 체결 %d주 @%s (금액 %s)",
-                name, quantity, f"{price:,}", f"{amount:,}",
+                "[가상매매] %s 1차 매수 체결 %d주 @%s (분할 1/2, 금액 %s)",
+                name, first_qty, f"{price:,}", f"{price * first_qty:,}",
             )
             notifier.send_to_users(
                 [get_admin_id()],
-                f"🛒 [가상 매수 체결] {name} ({ticker})\n"
-                f"💰 수량: {quantity}주 / 가격: {price:,}원\n"
-                f"💵 투자금액: {amount:,}원\n"
+                f"🛒 [가상 매수 1차] {name} ({ticker})\n"
+                f"💰 수량: {first_qty}주 / 가격: {price:,}원 (60%)\n"
+                f"💵 투자금액: {price * first_qty:,}원\n"
                 f"📊 사유: {', '.join(signal.reasons[:3])}\n"
-                f"⚠️ 모의투자 — 실제 돈은 사용되지 않았습니다"
+                f"⏳ 2차 매수({remaining_qty}주) 다음 체크에서 확인\n"
+                f"⚠️ 모의투자"
                 + CMD_FOOTER,
             )
-            # 가상 포지션 기록
             positions = load_auto_positions()
             positions[ticker] = {
                 "name": name,
-                "qty": quantity,
+                "qty": first_qty,
                 "buy_price": price,
-                "buy_amount": amount,
+                "buy_amount": price * first_qty,
                 "buy_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "mock": True,
+                "split_remaining": remaining_qty,  # 2차 매수 대기
+                "split_price": price,  # 1차 매수가 기록
             }
             save_auto_positions(positions)
             _buy_in_progress.discard(ticker)
