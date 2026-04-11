@@ -137,7 +137,7 @@ class RegimeEngine:
         self._defense_index_price: float | None = None
         self._cooldown_until: datetime | None = None
         self._transition_reason: str = ""
-        self._recent_changes: list[float] = []
+        self._recent_changes: list[tuple[str, float]] = []
         self._load_state()
 
     # -- Properties --
@@ -482,7 +482,8 @@ class RegimeEngine:
 
         self._defense_index_price = data.get("defense_index_price")
         self._transition_reason = data.get("reason", "")
-        self._recent_changes = data.get("recent_changes", [])
+        raw_changes = data.get("recent_changes", [])
+        self._recent_changes = [tuple(x) if isinstance(x, list) else x for x in raw_changes]
 
         cooldown_str = data.get("cooldown_until")
         if cooldown_str:
