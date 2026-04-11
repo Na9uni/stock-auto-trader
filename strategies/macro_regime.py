@@ -185,15 +185,49 @@ def save_macro_override(overrides: dict) -> None:
     logger.info("[매크로] 오버라이드 저장: %s", overrides)
 
 
+def _fetch_macro_data() -> dict:
+    """yfinance에서 매크로 데이터 자동 수집. 실패 시 빈 dict."""
+    import yfinance as yf
+    result = {}
+    try:
+        # 유가 (Brent Crude)
+        bz = yf.Ticker("BZ=F")
+        bz_hist = bz.history(period="3mo")
+        if len(bz_hist) >= 2:
+            result["oil_price"] = float(bz_hist["Close"].iloc[-1])
+            result["oil_price_3m_ago"] = float(bz_hist["Close"].iloc[0])
+
+        # 환율 (USD/KRW)
+        fx = yf.Ticker("KRW=X")
+        fx_hist = fx.history(period="3mo")
+        if len(fx_hist) >= 2:
+            result["fx_rate"] = float(fx_hist["Close"].iloc[-1])
+            result["fx_rate_3m_ago"] = float(fx_hist["Close"].iloc[0])
+
+        # VKOSPI (한국 VIX) - yfinance에서 직접 불가, KOSPI 변동성으로 대체
+        kospi = yf.Ticker("^KS11")
+        kospi_hist = kospi.history(period="5d")
+        if len(kospi_hist) >= 2:
+            result["kospi_change_1d"] = float(
+                (kospi_hist["Close"].iloc[-1] / kospi_hist["Close"].iloc[-2] - 1) * 100
+            )
+    except Exception as e:
+        logger.warning("[매크로] 자동 수집 실패 (무시): %s", e)
+    return result
+
+
 def assess_current() -> MacroStatus:
     """현재 매크로 상태 판별.
 
-    data/macro_override.json이 있으면 그 값 사용.
-    없으면 기본값 (전쟁 진행 중) 사용.
-    텔레그램 /레짐 명령으로 override 변경 가능.
+    1. yfinance에서 유가/환율/KOSPI 자동 수집
+    2. 기본값 (자동 수집 실패 시 보수적)
+    3. data/macro_override.json 오버라이드 (텔레그램 /레짐 명령)
+    우선순위: override > auto_data > defaults
     """
-    # 기본값: 보수적 (CAUTION). 오버라이드 없으면 자동으로 신중 모드.
-    # crisis_score 2~3 수준 → CAUTION 또는 borderline NORMAL.
+    # 1. 자동 수집
+    auto_data = _fetch_macro_data()
+
+    # 2. 기본값: 보수적 (CAUTION). 자동 수집 실패 시 신중 모드.
     defaults = {
         "oil_price": 90,
         "oil_price_3m_ago": 72,
@@ -204,11 +238,13 @@ def assess_current() -> MacroStatus:
         "war_active": False,
     }
 
-    # override 파일이 있으면 해당 값으로 덮어쓰기 (텔레그램 /레짐 명령)
+    # 3. 오버라이드 (텔레그램 명령)
     overrides = _load_override()
     if not overrides:
         logger.warning("[매크로] 오버라이드 파일 없음 — 보수적 기본값 사용")
-    merged = {**defaults, **overrides}
+
+    # 우선순위: override > auto_data > defaults
+    merged = {**defaults, **auto_data, **overrides}
 
     return assess_macro(**merged)
 

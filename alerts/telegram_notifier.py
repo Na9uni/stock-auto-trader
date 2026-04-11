@@ -76,27 +76,37 @@ class TelegramNotifier:
     # ------------------------------------------------------------------
 
     def _post_message(self, chat_id: str, text: str) -> bool:
-        """텔레그램 sendMessage API 호출. 성공 여부 반환."""
+        """텔레그램 sendMessage API 호출. 실패 시 3초 후 1회 재시도."""
+        import time as _time
+
         url = f"{self.base_url}/sendMessage"
         payload = {
             "chat_id": chat_id,
             "text": text,
             "parse_mode": "HTML",
         }
-        try:
-            resp = requests.post(url, json=payload, timeout=10)
-            if resp.status_code == 200 and resp.json().get("ok"):
-                return True
-            logger.error(
-                "텔레그램 발송 실패 chat_id=%s status=%s body=%s",
-                chat_id,
-                resp.status_code,
-                resp.text[:200],
-            )
-            return False
-        except requests.RequestException as exc:
-            logger.error("텔레그램 발송 예외 chat_id=%s error=%s", chat_id, exc)
-            return False
+        for attempt in range(2):
+            try:
+                resp = requests.post(url, json=payload, timeout=10)
+                if resp.status_code == 200 and resp.json().get("ok"):
+                    return True
+                logger.error(
+                    "텔레그램 발송 실패 chat_id=%s status=%s body=%s (attempt=%d)",
+                    chat_id,
+                    resp.status_code,
+                    resp.text[:200],
+                    attempt + 1,
+                )
+                if attempt == 0:
+                    _time.sleep(3)
+            except requests.RequestException as exc:
+                logger.error(
+                    "텔레그램 발송 예외 chat_id=%s error=%s (attempt=%d)",
+                    chat_id, exc, attempt + 1,
+                )
+                if attempt == 0:
+                    _time.sleep(3)
+        return False
 
 
 # ------------------------------------------------------------------

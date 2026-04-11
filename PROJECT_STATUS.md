@@ -1,4 +1,4 @@
-# 주식 자동매매 시스템 v2 -- 프로젝트 현황
+# 주식 자동매매 시스템 v3 -- 프로젝트 현황
 
 ## GitHub 저장소
 https://github.com/Na9uni/stock-auto-trader (private)
@@ -8,21 +8,35 @@ https://github.com/Na9uni/stock-auto-trader (private)
 - IPC: JSON 파일 (kiwoom_data.json, order_queue.json, auto_positions.json)
 - 키움 OpenAPI+: 30초 폴링 + 실시간 체결/호가(SetRealReg)
 
-## 파일 구조 (v3 AUTO 전환)
+## 파일 구조 (v3 AUTO + 4-Mode 레짐 엔진)
 ```
 stock/
 ├── config/                        # 설정 통합
 │   ├── trading_config.py          # TradingConfig (frozen dataclass, .env 로드)
 │   └── whitelist.py               # 화이트리스트 + ETF/개별주 분류
 ├── strategies/                    # 전략 플러그인
-│   ├── base.py                    # Strategy 프로토콜, MarketContext, SignalResult
-│   ├── vb_strategy.py             # 변동성 돌파 (데이트레이딩)
+│   ├── base.py                    # Strategy 프로토콜, MarketContext, SignalResult (통합)
+│   ├── vb_strategy.py             # 변동성 돌파 (데이트레이딩) + ATR 조기감지 + 전일저가 이탈
 │   ├── score_strategy.py          # 합산 전략 (거부권 모드)
 │   ├── combo_strategy.py          # VB + 거부권 조합
-│   ├── trend_strategy.py          # [NEW] 추세추종 (골든/데드크로스)
-│   └── auto_strategy.py           # [NEW] 자동 전환 (상승장=VB, 하락장=추세추종)
-├── alerts/
-│   ├── analysis_scheduler.py      # 메인 스케줄러 (전략 연결 완료)
+│   ├── trend_strategy.py          # 추세추종 (골든/데드크로스)
+│   ├── auto_strategy.py           # 자동 전환 (상승장=VB, 하락장=추세추종+위기평균회귀)
+│   ├── regime_engine.py           # 4-Mode 레짐 엔진 (NORMAL/SWING/DEFENSE/CASH)
+│   ├── macro_regime.py            # 매크로 레짐 (지정학+유가+환율)
+│   ├── crisis_meanrev.py          # 위기장 평균회귀 (RSI2 기반)
+│   ├── crisis_rotation.py         # 위기 로테이션
+│   └── momentum_rotation.py       # 모멘텀 로테이션
+├── alerts/                        # 스케줄러 모듈 (분리 완료)
+│   ├── analysis_scheduler.py      # 메인 스케줄러 (설정 주입 + re-export)
+│   ├── _state.py                  # 공유 설정, 전략, 인메모리 상태
+│   ├── signal_runner.py           # 신호 감지 (단일 루프) + EOD 청산 + US 프리마켓
+│   ├── order_manager.py           # 주문 상태 체크, 큐 정리 (리팩토링 완료)
+│   ├── file_io.py                 # 경로 상수, JSON I/O, 캔들/지표 유틸
+│   ├── market_guard.py            # 손실 관리, 급락 감지, 장 시간, 쿨다운
+│   ├── trade_executor.py          # 자동매매 실행 (매수/매도)
+│   ├── position_manager.py        # 포지션 손절/트레일링/과매수 감시
+│   ├── crisis_manager.py          # 위기장 평균회귀 (RSI2) 관리
+│   ├── notifications.py           # 텔레그램 알림, 신호 헤더, 사용자 관리
 │   ├── signal_detector.py         # RSI/MACD/볼린저 합산 (거부권용)
 │   ├── volatility_breakout.py     # 레거시 VB (vb_strategy로 대체)
 │   ├── telegram_commander.py      # 텔레그램 명령 처리
@@ -34,9 +48,9 @@ stock/
 │   ├── kiwoom_order_queue.py      # JSON IPC 주문 큐
 │   └── targets.py                 # 목표가/손절가 감시
 ├── backtest/
-│   ├── backtester_v2.py           # [NEW] 통합 백테스터 (비용 현실화)
-│   ├── cost_model.py              # [NEW] 실전 비용 모델 (보호지정가 반영)
-│   ├── exit_manager.py            # [NEW] 실전 동일 청산 로직
+│   ├── backtester_v2.py           # 통합 백테스터 (비용 현실화)
+│   ├── cost_model.py              # 실전 비용 모델 (보호지정가 반영)
+│   ├── exit_manager.py            # 실전 동일 청산 로직
 │   ├── backtester.py              # 레거시 백테스터
 │   ├── backtest_vb.py             # 레거시 VB 백테스트
 │   ├── optimize.py                # 그리드 서치 최적화
@@ -45,7 +59,7 @@ stock/
 │   └── kiwoom_collector.py        # 32-bit 키움 데이터 수집기
 ├── ai/
 │   └── ai_analyzer.py             # Claude Sonnet AI 판단
-├── data/                          # JSON 데이터 파일들
+├── data/                          # JSON 데이터 파일들 (regime_state.json 포함)
 ├── ui/
 │   └── dashboard.py               # Streamlit 대시보드
 ├── utils/
@@ -53,16 +67,30 @@ stock/
 └── .env                           # 환경변수
 ```
 
-## 전략 (v3: AUTO 자동 전환)
+## 전략 (v3: AUTO + 4-Mode 레짐 엔진)
 
 ### 현재 전략: AUTO (2026-04-09~)
+- 4-Mode 레짐 엔진: NORMAL / SWING / DEFENSE / CASH
+  - 매크로 레짐(지정학+유가+환율) + 지수 등락 조합 판정
+  - Anti-oscillation: 위험 상승은 즉시 전환, 하위(위험 하락)는 쿨다운 필요
 - 시장 레짐 자동 판단: MA20 > MA60 → 상승장, MA20 < MA60 → 하락장
 - 급락 감지: 현재가가 MA20보다 10% 이상 아래면 → 하락장 강제 전환
 - 상승장 → 변동성 돌파 (데이트레이딩) + 합산 거부권
-- 하락장 → 추세추종 (골든/데드크로스) → 거의 안 사고 대기
+- 하락장 → 추세추종 + 위기장 평균회귀 (RSI2) 자동 전환
 - 전략 선택: STRATEGY=auto (vb | score | combo | trend | auto)
+- SignalResult 통합: 모든 전략이 동일한 SignalResult 반환
+- 단일 루프 디스패치: signal_runner.py에서 전략별 분기 없이 통합 처리
 
-### 추세추종 전략 (trend_strategy.py, 2026-04-08 추가)
+### 위기장 평균회귀 (crisis_meanrev.py)
+- AUTO 하락장 모드에 통합
+- 진입: 일봉 RSI(2) < 15 + 반등 확인 + 당일 -2% 하락 + 종가 매수
+- 청산: 트레일링 스탑 / 손절 -2% / RSI2>=80 과매수 / 시간청산 48h
+
+### ATR 조기감지 + 전일저가 이탈 (vb_strategy.py)
+- ATR 기반 early detection: 목표가 도달 전 조기 진입 신호
+- 전일 저가 이탈 감지: 하방 추세 조기 경고
+
+### 추세추종 전략 (trend_strategy.py)
 - 매수: 5일선이 20일선을 위로 뚫을 때 (골든크로스) + 60일선 위
 - 매도: 5일선이 20일선을 아래로 뚫을 때 (데드크로스)
 - 손절: -5%
@@ -82,7 +110,17 @@ stock/
 - 합산 신호: 5분 경계(00/05/10/15...) 직후 30초 이내에만 감지
 - 변동성 돌파: 매분 체크 (일봉 기반이라 미확정 문제 없음)
 
-## 설정 (.env) -- v2 변경 사항
+### 운영 스케줄
+- 08:30 프리마켓 뉴스
+- 08:40 미국 프리마켓 체크 (US premarket)
+- 09:00 장 시작 알림
+- 매 1분 신호 감지 + 주문 상태 + 포지션 감시
+- 15:20 EOD 강제 청산 (+ 15:25 재시도)
+- 15:40 장 마감 알림
+- 16:00 일일 리포트
+- 5일 누적 하락 추적 (레짐 엔진 연동)
+
+## 설정 (.env) -- v3 변경 사항
 ```
 # 리스크 (대폭 축소)
 STOPLOSS_PCT=2.0          # 3.5% -> 2.0%
@@ -97,11 +135,16 @@ MAX_MONTHLY_LOSS=100000   # 1000000 -> 100000 (10%)
 MAX_CONSEC_STOPLOSS=2     # 3 -> 2
 
 # 전략
-STRATEGY=auto             # [NEW] vb | score | combo | trend | auto
-VB_K=0.5                  # [NEW] ETF K값
-VB_K_INDIVIDUAL=0.6       # [NEW] 개별주 K값
-BUY_START_MINUTE=10       # [NEW] 장 시작 10분 이후
-BUY_END_HOUR=16           # 16시 이후 매수 차단 (데이터 수집 단계 완화)
+STRATEGY=auto             # vb | score | combo | trend | auto
+VB_K=0.5                  # ETF K값
+VB_K_INDIVIDUAL=0.6       # 개별주 K값
+BUY_START_MINUTE=10       # 장 시작 10분 이후
+BUY_END_HOUR=16           # 16시 이후 매수 차단
+
+# 레짐 엔진 (v3 신규)
+# regime_engine.py 내 RegimeState: NORMAL/SWING/DEFENSE/CASH
+# macro_regime.py: 유가/환율/VIX 기반 매크로 판별
+# 매크로 데이터 자동 수집 (yfinance)
 ```
 
 ## 백테스트 v2 결과 (비용 현실화)
@@ -137,16 +180,23 @@ BUY_END_HOUR=16           # 16시 이후 매수 차단 (데이터 수집 단계 
 거래 횟수 대폭 감소 (레짐 필터 효과).
 
 ## 남은 과제
-1. ~~AUTO 전략 구현~~ ✅ (2026-04-09)
-2. ~~추세추종 전략 추가~~ ✅ (2026-04-08)
-3. ~~급락 감지 보조 필터~~ ✅ (현재가 vs MA20 이격도 -10%)
-4. 하락장 추가 방어 (MA20 < MA120이면 매매 완전 중단)
-5. ATR 기반 동적 손절 (고정 2% -> 1.5xATR)
-6. K값 종목별 최적화 (walk-forward 검증)
-7. 소형주(보성파워텍 등) 비용 2.2% -> 화이트리스트 재검토
-8. 5분봉 데이터 축적 후 장중 백테스트 전환
-9. 모듈 분리 (analysis_scheduler.py → _state/signal_runner/order_manager)
-10. AUTO 하락장 방어 개선 (백테스트 하락장 -71만 → -30만 이하 목표)
+1. ~~AUTO 전략 구현~~ (2026-04-09)
+2. ~~추세추종 전략 추가~~ (2026-04-08)
+3. ~~급락 감지 보조 필터~~ (현재가 vs MA20 이격도 -10%)
+4. ~~4-Mode 레짐 엔진 구현~~ (2026-04-12, 4차 리뷰 완료)
+5. ~~위기장 평균회귀 AUTO 하락장 통합~~ (2026-04-12)
+6. ~~SignalResult 통합 + 단일 루프 디스패치~~ (2026-04-12)
+7. ~~ATR 조기감지 + 전일저가 이탈~~ (2026-04-12)
+8. ~~US 프리마켓 체크 (08:40)~~ (2026-04-12)
+9. ~~5일 누적 하락 추적~~ (2026-04-12)
+10. ~~EOD 강제 청산 (15:20)~~ (2026-04-12)
+11. ~~매크로 데이터 자동 수집~~ (2026-04-12)
+12. ~~모듈 분리 (analysis_scheduler → _state/signal_runner/order_manager)~~ (2026-04-12)
+13. ~~order_manager 리팩토링 (check_order_status 분할)~~ (2026-04-12)
+14. K값 종목별 최적화 (walk-forward 검증)
+15. 소형주(보성파워텍 등) 비용 2.2% -> 화이트리스트 재검토
+16. 5분봉 데이터 축적 후 장중 백테스트 전환
+17. AUTO 하락장 방어 개선 (백테스트 하락장 -71만 -> -30만 이하 목표)
 
 ## 실전 거래 기록
 | 날짜 | 종목 | 보유시간 | 손익 | 사유 |

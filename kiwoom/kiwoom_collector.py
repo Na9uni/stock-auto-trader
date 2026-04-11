@@ -808,7 +808,12 @@ class KiwoomCollector:
         return result
 
     def collect_candles_1m(self, ticker: str, count: int = CANDLE_COUNT) -> list[dict] | None:
-        """Fetch opt10080 5-minute candles."""
+        """Fetch opt10080 5-minute candles.
+
+        NOTE: "candles_1m" 키는 역사적 이유로 5분봉 데이터를 저장합니다.
+        opt10080 (5분봉 조회) 결과이며, 실제 1분봉이 아닙니다.
+        키 이름 변경 시 signal_runner.py, position_manager.py 등 전체 수정 필요.
+        """
         result = self.api.request_opt10080(ticker, count)
         time.sleep(TR_SLEEP_SEC)
         return result
@@ -852,6 +857,9 @@ class KiwoomCollector:
             updated["prev_close"] = basic.get("prev_close", 0)
             updated["prev_volume"] = basic.get("prev_volume", 0)
             updated["trade_amount"] = basic.get("trade_amount", 0)
+        # NOTE: "candles_1m" 키는 역사적 이유로 5분봉 데이터를 저장합니다.
+        # opt10080 (5분봉 조회) 결과이며, 실제 1분봉이 아닙니다.
+        # 키 이름 변경 시 signal_runner.py, position_manager.py 등 전체 수정 필요.
         if candles_1m is not None:
             updated["candles_1m"] = candles_1m
         if candles_1d is not None:

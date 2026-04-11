@@ -210,6 +210,7 @@ def run_scheduler() -> None:
     schedule.every(1).minutes.do(check_interest_spikes)
     schedule.every(1).minutes.do(check_auto_positions)
     schedule.every().day.at("15:20").do(check_eod_liquidation)
+    schedule.every().day.at("15:25").do(check_eod_liquidation)  # 재시도
     schedule.every().day.at("08:30").do(send_premarket_news)
     schedule.every().day.at("08:40").do(check_premarket_us)
     schedule.every().day.at("09:00").do(send_market_open)

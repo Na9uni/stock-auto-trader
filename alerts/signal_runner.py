@@ -76,8 +76,9 @@ def _build_market_context(
         return None
 
     # 5분봉 DataFrame (거부권 체크용)
-    # 주의: kiwoom_data.json의 "candles_1m" 키는 실제로 5분봉 데이터
-    # (키 이름이 1m이지만 opt10080 = 5분봉 조회 결과)
+    # NOTE: "candles_1m" 키는 역사적 이유로 5분봉 데이터를 저장합니다.
+    # opt10080 (5분봉 조회) 결과이며, 실제 1분봉이 아닙니다.
+    # 키 이름 변경 시 signal_runner.py, position_manager.py 등 전체 수정 필요.
     df_5m = candles_to_df(info.get("candles_1m", []))
     df_5m_ind = calc_indicators(df_5m)
 
@@ -148,6 +149,7 @@ def _process_signal(
         _sig_macd = signal.macd_cross
         _sig_vol = signal.vol_ratio
         if pd.isna(_sig_rsi):
+            # NOTE: "candles_1m" 키는 실제로 5분봉 (opt10080) 데이터
             df_5m = candles_to_df(info.get("candles_1m", []))
             df_5m_ind = calc_indicators(df_5m)
             if df_5m_ind is not None and len(df_5m_ind) > 0:
