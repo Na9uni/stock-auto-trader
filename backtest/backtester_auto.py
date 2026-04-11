@@ -1,12 +1,16 @@
-"""AUTO 통합 백테스터 — VB + 추세추종 + 레짐 전환 + 거부권 전체 시뮬레이션.
+"""AUTO 통합 백테스터 — VB + 추세추종 + 위기MR + 4-모드 레짐 + 거부권 전체 시뮬레이션.
 
 backtester_v2.py 가 VB 단독 테스트인 반면,
 이 모듈은 auto_strategy.py 의 전체 로직을 재현한다:
 
-1. 레짐 판단: MA20 vs MA60 (상승/하락)
-2. 상승장 → 변동성 돌파(VB) + 거부권(score <= -3 시 매수 차단)
-3. 하락장 → 추세추종(골든/데드크로스)
-4. VB 포지션은 EOD 강제 청산, 추세 포지션은 데드크로스까지 보유
+1. 레짐 판단:
+   - 1차: 지수(KOSPI proxy) 기반 4-모드 레짐 (NORMAL/SWING/DEFENSE/CASH)
+   - 2차: 종목별 MA20/MA60 bull/bear 판단
+2. 상승장(NORMAL+bull) → 변동성 돌파(VB) + 거부권(score <= -3 시 매수 차단)
+3. 하락장(bear) → 추세추종(골든/데드크로스) + 위기 평균회귀(ETF, RSI2<15)
+4. DEFENSE/CASH → 신규 매수 차단
+5. VB 포지션은 EOD 강제 청산, 추세 포지션은 데드크로스까지 보유
+6. 위기MR 포지션은 RSI2>=80 / 트레일링 / 손절 / 시간청산(2일)
 """
 
 from __future__ import annotations
@@ -30,6 +34,132 @@ from config.trading_config import TradingConfig
 VETO_THRESHOLD = -3
 
 
+# ── 4-모드 레짐 시뮬레이션 ─────────────────────────────────────
+class _RegimeSimulator:
+    """백테스트 전용 레짐 시뮬레이터.
+
+    실전 regime_engine.py 의 판별 로직을 일봉 지수 데이터로 재현.
+    지수 일봉의 일일 등락률 + 누적 하락 + ATR 급팽창을 사용.
+
+    RegimeState: NORMAL / SWING / DEFENSE / CASH
+    """
+
+    NORMAL = "NORMAL"
+    SWING = "SWING"
+    DEFENSE = "DEFENSE"
+    CASH = "CASH"
+
+    _SEVERITY = {
+        "NORMAL": 0,
+        "SWING": 1,
+        "DEFENSE": 2,
+        "CASH": 3,
+    }
+
+    def __init__(
+        self,
+        defense_trigger_pct: float = -2.0,
+        cash_trigger_pct: float = -3.0,
+        swing_trigger_pct: float = -1.5,
+        cumul_defense_pct: float = -8.0,
+        cumul_swing_pct: float = -5.0,
+        cooldown_days: int = 2,
+    ):
+        self._defense_trigger = defense_trigger_pct
+        self._cash_trigger = cash_trigger_pct
+        self._swing_trigger = swing_trigger_pct
+        self._cumul_defense = cumul_defense_pct
+        self._cumul_swing = cumul_swing_pct
+        self._cooldown_days = cooldown_days
+
+        self._state = self.NORMAL
+        self._defense_price: float | None = None
+        self._recent_changes: list[float] = []
+        self._cooldown_remaining = 0
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    def detect(
+        self,
+        index_change_pct: float,
+        index_close: float,
+        atr_ratio: float = 1.0,
+    ) -> str:
+        """일봉 1개를 먹고 레짐 갱신.
+
+        Args:
+            index_change_pct: 지수 일일 등락률 (%)
+            index_close: 지수 종가
+            atr_ratio: 당일 range / 10일 평균 range
+
+        Returns:
+            현재 레짐 문자열
+        """
+        # 누적 추적
+        self._recent_changes.append(index_change_pct)
+        self._recent_changes = self._recent_changes[-5:]
+
+        cumul_5d = sum(self._recent_changes) if len(self._recent_changes) >= 3 else 0
+
+        new_state = self.NORMAL
+        # -- CASH 조건 --
+        if (
+            self._state == self.DEFENSE
+            and self._defense_price is not None
+            and index_close > 0
+        ):
+            drop_from_defense = (
+                (index_close - self._defense_price) / self._defense_price * 100
+            )
+            if drop_from_defense <= self._cash_trigger:
+                new_state = self.CASH
+
+        # -- 누적 하락 --
+        if cumul_5d <= self._cumul_defense and new_state == self.NORMAL:
+            new_state = self.DEFENSE
+        elif cumul_5d <= self._cumul_swing and new_state == self.NORMAL:
+            new_state = self.SWING
+
+        # -- 당일 급락 --
+        if new_state == self.NORMAL:
+            if index_change_pct <= self._defense_trigger:
+                new_state = self.DEFENSE
+            elif index_change_pct <= self._swing_trigger:
+                new_state = self.SWING
+
+        # -- ATR 급팽창 --
+        if new_state == self.NORMAL:
+            if atr_ratio >= 2.5:
+                new_state = self.DEFENSE
+            elif atr_ratio >= 1.8:
+                new_state = self.SWING
+
+        # -- Anti-oscillation --
+        new_sev = self._SEVERITY[new_state]
+        cur_sev = self._SEVERITY[self._state]
+
+        if new_sev > cur_sev:
+            # 위험 상승 -> 즉시 전환
+            if new_state == self.DEFENSE and index_close > 0:
+                self._defense_price = index_close
+            self._state = new_state
+            self._cooldown_remaining = 0
+        elif new_sev < cur_sev:
+            # 위험 하강 -> 쿨다운
+            if self._cooldown_remaining <= 0:
+                self._cooldown_remaining = self._cooldown_days
+            self._cooldown_remaining -= 1
+            if self._cooldown_remaining <= 0:
+                if new_state != self.DEFENSE:
+                    self._defense_price = None
+                self._state = new_state
+        # 동일 레짐이면 변경 없음 (쿨다운 카운트도 안 줄임)
+
+        return self._state
+
+
 class BacktesterAuto:
     """AUTO 통합 백테스트 엔진."""
 
@@ -39,9 +169,9 @@ class BacktesterAuto:
         self._exit = ExitManager(self._config)
         self._indicators = TechnicalIndicators()
 
-    # ── 레짐 판단 ──────────────────────────────────────────
+    # ── 종목별 bull/bear 판단 ─────────────────────────────────
     @staticmethod
-    def _regime(ma20: float, ma60: float) -> str:
+    def _stock_regime(ma20: float, ma60: float) -> str:
         """MA20 vs MA60 으로 bull / bear 판단."""
         if ma20 <= 0 or ma60 <= 0:
             return "unknown"
@@ -55,7 +185,7 @@ class BacktesterAuto:
         """최근 20봉 기반 간이 합산 점수로 거부권 여부 판단.
 
         실전에서는 5분봉 기반이지만 백테스트는 일봉만 있으므로
-        RSI·MACD 기반 간이 점수를 계산한다.
+        RSI/MACD 기반 간이 점수를 계산한다.
         score <= -3 이면 거부권 발동 (True).
         """
         if idx < 20:
@@ -107,6 +237,20 @@ class BacktesterAuto:
                 score -= 2
 
         return score <= VETO_THRESHOLD
+
+    # ── RSI(2) 계산 ───────────────────────────────────────────
+    @staticmethod
+    def _rsi2(prices: pd.Series) -> pd.Series:
+        """RSI(2) - Wilder EMA, period=2."""
+        delta = prices.diff()
+        gain = delta.clip(lower=0)
+        loss = (-delta).clip(lower=0)
+        avg_gain = gain.ewm(alpha=0.5, min_periods=2, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=0.5, min_periods=2, adjust=False).mean()
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        rsi[(avg_gain == 0) & (avg_loss == 0)] = 50
+        return rsi
 
     # ── 골든/데드크로스 판단 ─────────────────────────────────
     @staticmethod
@@ -160,8 +304,22 @@ class BacktesterAuto:
         )
 
     # ── 메인 백테스트 ──────────────────────────────────────
-    def run(self, ticker: str, df: pd.DataFrame) -> dict:
-        """AUTO 통합 백테스트 실행."""
+    def run(
+        self,
+        ticker: str,
+        df: pd.DataFrame,
+        index_df: pd.DataFrame | None = None,
+        is_etf: bool = False,
+    ) -> dict:
+        """AUTO 통합 백테스트 실행.
+
+        Args:
+            ticker: 종목 코드
+            df: 종목 일봉 데이터
+            index_df: 지수(KOSPI proxy) 일봉 데이터 (레짐 판별용).
+                      None이면 종목 데이터로 대체.
+            is_etf: ETF 여부 (위기 평균회귀 허용 판단)
+        """
         df = df.copy().reset_index(drop=True)
 
         # 이동평균 / 보조지표 계산
@@ -171,7 +329,11 @@ class BacktesterAuto:
         df["ma20"] = df["close"].rolling(20).mean()
         df["ma60"] = df["close"].rolling(60).mean()
 
-        # RSI·ATR (ExitManager 용)
+        # RSI(2) for crisis mean-reversion
+        df["rsi2"] = self._rsi2(df["close"])
+        df["change_pct"] = df["close"].pct_change() * 100
+
+        # RSI/ATR (ExitManager 용)
         df_ind = self._indicators.get_all_indicators(df)
 
         k = self._config.vb_k if self._config.is_etf(ticker) else self._config.vb_k_individual
@@ -179,17 +341,38 @@ class BacktesterAuto:
         cash = capital
 
         # 포지션 상태
-        vb_pos = None     # VB 포지션 (당일 매수→EOD 청산)
-        trend_pos = None  # 추세 포지션 (데드크로스까지 보유)
+        vb_pos = None       # VB 포지션 (당일 매수 -> EOD 청산)
+        trend_pos = None    # 추세 포지션 (데드크로스까지 보유)
+        mr_pos = None       # 위기MR 포지션 (RSI2>=80/트레일링/시간청산)
 
         trades: list[dict] = []
         equity_curve: list[tuple] = []
 
         # 통계
-        regime_days = {"bull": 0, "bear": 0, "unknown": 0}
+        regime_days = {"NORMAL": 0, "SWING": 0, "DEFENSE": 0, "CASH": 0}
+        stock_regime_days = {"bull": 0, "bear": 0, "unknown": 0}
         vb_trades = 0
         trend_trades = 0
+        mr_trades = 0
         veto_count = 0
+        eod_liquidation_count = 0
+        regime_blocked_count = 0    # DEFENSE/CASH 로 매수 차단된 횟수
+
+        # ── 지수 데이터 정렬 + ATR 준비 ──
+        if index_df is not None and not index_df.empty:
+            idx_df = index_df.copy().reset_index(drop=True)
+            idx_df["idx_range"] = idx_df["high"] - idx_df["low"]
+            idx_df["idx_change_pct"] = idx_df["close"].pct_change() * 100
+            # 10일 평균 range
+            idx_df["idx_avg_range_10"] = idx_df["idx_range"].rolling(10).mean()
+        else:
+            idx_df = None
+
+        # 레짐 시뮬레이터 초기화
+        regime_sim = _RegimeSimulator(
+            defense_trigger_pct=self._config.regime_defense_trigger_pct,
+            cash_trigger_pct=self._config.regime_cash_trigger_pct,
+        )
 
         start_idx = max(61, 11)  # MA60 워밍업
 
@@ -207,9 +390,36 @@ class BacktesterAuto:
             prev_ma60 = float(prev["ma60"]) if not pd.isna(prev.get("ma60", float("nan"))) else 0
             prev_ma10 = float(prev["ma10"]) if not pd.isna(prev.get("ma10", float("nan"))) else 0
 
-            # 레짐 판단 (전일 기준)
-            regime = self._regime(prev_ma20, prev_ma60)
-            regime_days[regime] += 1
+            # ── 4-모드 레짐 판단 (지수 기반) ──
+            if idx_df is not None and i < len(idx_df):
+                idx_change = float(idx_df.iloc[i]["idx_change_pct"]) if not pd.isna(idx_df.iloc[i]["idx_change_pct"]) else 0
+                idx_close = float(idx_df.iloc[i]["close"])
+                avg_r = float(idx_df.iloc[i]["idx_avg_range_10"]) if not pd.isna(idx_df.iloc[i].get("idx_avg_range_10", float("nan"))) else 0
+                cur_r = float(idx_df.iloc[i]["idx_range"])
+                atr_ratio = cur_r / avg_r if avg_r > 0 else 1.0
+                system_regime = regime_sim.detect(idx_change, idx_close, atr_ratio)
+            else:
+                # 지수 데이터 없으면 종목 등락률로 대체
+                chg = float(today["change_pct"]) if not pd.isna(today.get("change_pct", float("nan"))) else 0
+                system_regime = regime_sim.detect(chg, float(today_close))
+
+            regime_days[system_regime] += 1
+
+            # ── 종목별 bull/bear 판단 (전일 기준) ──
+            stock_reg = self._stock_regime(prev_ma20, prev_ma60)
+            stock_regime_days[stock_reg] += 1
+
+            # ── 실효 레짐 결정 ──
+            # DEFENSE/CASH -> bear 강제 (production auto_strategy.py 와 동일)
+            if system_regime in (_RegimeSimulator.DEFENSE, _RegimeSimulator.CASH):
+                effective_regime = "bear"
+                buy_allowed = False  # DEFENSE/CASH 에서는 신규 매수 차단
+            elif system_regime == _RegimeSimulator.SWING:
+                effective_regime = "bear"  # 스윙 = 보수적
+                buy_allowed = True
+            else:
+                effective_regime = stock_reg
+                buy_allowed = True
 
             # RSI / ATR
             rsi = 50.0
@@ -224,8 +434,13 @@ class BacktesterAuto:
 
             target = today_open + int(prev_range * k)
 
+            # RSI(2) for crisis MR
+            today_rsi2 = float(df.iloc[i]["rsi2"]) if not pd.isna(df.iloc[i]["rsi2"]) else 50
+            prev_rsi2 = float(df.iloc[i - 1]["rsi2"]) if not pd.isna(df.iloc[i - 1]["rsi2"]) else 50
+            today_change_pct = float(df.iloc[i]["change_pct"]) if not pd.isna(df.iloc[i]["change_pct"]) else 0
+
             # ================================================================
-            # VB 포지션 처리 (보유 중이면 장중 손절/트레일링 체크 → EOD 청산)
+            # VB 포지션 처리 (보유 중이면 장중 손절/트레일링 체크 -> EOD 청산)
             # ================================================================
             if vb_pos is not None:
                 exit_actions, new_trail, new_partial = self._exit.check(
@@ -297,6 +512,7 @@ class BacktesterAuto:
                         "strategy": "VB",
                     })
                     vb_pos = None
+                    eod_liquidation_count += 1
 
             # ================================================================
             # 추세 포지션 처리 (데드크로스 시 청산)
@@ -324,12 +540,72 @@ class BacktesterAuto:
                     trend_pos = None
 
             # ================================================================
+            # 위기MR 포지션 처리 (RSI2>=80 수익중 / 트레일링 / 손절 / 시간청산)
+            # ================================================================
+            if mr_pos is not None:
+                days_held = i - mr_pos["entry_idx"]
+                pct_from_buy = (today_close - mr_pos["buy_price"]) / mr_pos["buy_price"] * 100
+                pct_low = (today_low - mr_pos["buy_price"]) / mr_pos["buy_price"] * 100
+                if today_high > mr_pos["high_price"]:
+                    mr_pos["high_price"] = today_high
+                drop_from_high = (mr_pos["high_price"] - today_low) / mr_pos["high_price"] * 100
+
+                sell_mr = False
+                mr_sell_price = today_close
+                mr_reason = ""
+
+                # 손절 -2%
+                if pct_low <= -2.0:
+                    sell_mr = True
+                    mr_sell_price = int(mr_pos["buy_price"] * 0.98)
+                    mr_reason = f"위기MR-손절({pct_low:+.1f}%)"
+
+                # 트레일링: +2% 활성 -> 고점 대비 -1.5% 청산
+                elif pct_from_buy >= 2.0 or mr_pos.get("trailing_activated"):
+                    mr_pos["trailing_activated"] = True
+                    if drop_from_high >= 1.5:
+                        sell_mr = True
+                        mr_sell_price = int(mr_pos["high_price"] * 0.985)
+                        mr_reason = f"위기MR-트레일링({pct_from_buy:+.1f}%)"
+
+                # RSI(2) >= 80 + 수익 중
+                elif today_rsi2 >= 80 and pct_from_buy > 0:
+                    sell_mr = True
+                    mr_reason = f"위기MR-RSI과매수({today_rsi2:.0f})"
+
+                # 조기청산: 1일 + 손실 중
+                elif days_held >= 1 and pct_from_buy < 0:
+                    sell_mr = True
+                    mr_reason = f"위기MR-조기청산({days_held}d,{pct_from_buy:+.1f}%)"
+
+                # 시간청산: 2일
+                elif days_held >= 2:
+                    sell_mr = True
+                    mr_reason = f"위기MR-시간청산({days_held}d)"
+
+                if sell_mr:
+                    sell_qty = mr_pos["qty"]
+                    actual_sell = self._cost.sell_execution_price(mr_sell_price, mr_sell_price, ticker)
+                    comm, tax = self._cost.sell_cost(actual_sell, sell_qty, ticker)
+                    revenue = actual_sell * sell_qty - comm - tax
+                    buy_comm_remaining = mr_pos.get("buy_comm", 0)
+                    pnl = (actual_sell - mr_pos["buy_price"]) * sell_qty - comm - tax - buy_comm_remaining
+                    cash += revenue
+                    trades.append({
+                        "date": today_date, "side": "sell", "price": actual_sell,
+                        "qty": sell_qty, "pnl": pnl,
+                        "reason": mr_reason,
+                        "strategy": "CRISIS_MR",
+                    })
+                    mr_pos = None
+
+            # ================================================================
             # 매수 판단 (포지션 없을 때)
             # ================================================================
-            has_any_position = vb_pos is not None or trend_pos is not None
+            has_any_position = vb_pos is not None or trend_pos is not None or mr_pos is not None
 
             if not has_any_position:
-                if regime == "bull":
+                if effective_regime == "bull" and buy_allowed:
                     # ── 상승장: VB 매수 ──
                     if prev_ma10 <= 0 or today_open <= prev_ma10:
                         pass  # 마켓 필터 미충족
@@ -363,29 +639,69 @@ class BacktesterAuto:
                                 })
                                 vb_trades += 1
 
-                elif regime == "bear":
-                    # ── 하락장: 골든크로스 매수 ──
-                    ma60_today = float(today["ma60"]) if not pd.isna(today.get("ma60", float("nan"))) else 0
-                    if self._golden_cross(df, i) and today_close > ma60_today > 0:
-                        buy_price = self._cost.buy_execution_price(today_close, today_close, ticker)
-                        cost_per_share = buy_price * (1 + self._config.commission_rate)
-                        qty = int(cash // cost_per_share)
-                        if qty > 0:
-                            buy_comm = self._cost.buy_cost(buy_price, qty)
-                            cash -= (buy_price * qty + buy_comm)
-                            trend_pos = {
-                                "qty": qty,
-                                "buy_price": buy_price,
-                                "buy_comm": buy_comm,
-                                "high_price": today_high,
-                            }
-                            trades.append({
-                                "date": today_date, "side": "buy", "price": buy_price,
-                                "qty": qty, "pnl": 0,
-                                "reason": "추세-골든크로스",
-                                "strategy": "TREND",
-                            })
-                            trend_trades += 1
+                elif effective_regime == "bear":
+                    if not buy_allowed:
+                        # DEFENSE/CASH 에서 VB 신호가 있었을 경우 카운트
+                        if (
+                            stock_reg == "bull"
+                            and prev_ma10 > 0
+                            and today_open > prev_ma10
+                            and prev_range >= today_open * 0.005
+                            and today_high >= target
+                        ):
+                            regime_blocked_count += 1
+                    else:
+                        # ── 하락장: 1차 골든크로스 매수 ──
+                        ma60_today = float(today["ma60"]) if not pd.isna(today.get("ma60", float("nan"))) else 0
+                        if self._golden_cross(df, i) and today_close > ma60_today > 0:
+                            buy_price = self._cost.buy_execution_price(today_close, today_close, ticker)
+                            cost_per_share = buy_price * (1 + self._config.commission_rate)
+                            qty = int(cash // cost_per_share)
+                            if qty > 0:
+                                buy_comm = self._cost.buy_cost(buy_price, qty)
+                                cash -= (buy_price * qty + buy_comm)
+                                trend_pos = {
+                                    "qty": qty,
+                                    "buy_price": buy_price,
+                                    "buy_comm": buy_comm,
+                                    "high_price": today_high,
+                                }
+                                trades.append({
+                                    "date": today_date, "side": "buy", "price": buy_price,
+                                    "qty": qty, "pnl": 0,
+                                    "reason": "추세-골든크로스",
+                                    "strategy": "TREND",
+                                })
+                                trend_trades += 1
+
+                        # ── 하락장: 2차 위기 평균회귀 (ETF만, buy_allowed 시) ──
+                        elif is_etf and buy_allowed:
+                            oversold = today_rsi2 < 15
+                            drop = today_change_pct <= -2.0
+                            bounce = (prev_rsi2 < 10 and today_rsi2 > prev_rsi2) or today_rsi2 < 5
+
+                            if oversold and drop and bounce:
+                                buy_price = self._cost.buy_execution_price(today_close, today_close, ticker)
+                                cost_per_share = buy_price * (1 + self._config.commission_rate)
+                                qty = int(cash // cost_per_share)
+                                if qty > 0:
+                                    buy_comm = self._cost.buy_cost(buy_price, qty)
+                                    cash -= (buy_price * qty + buy_comm)
+                                    mr_pos = {
+                                        "qty": qty,
+                                        "buy_price": buy_price,
+                                        "buy_comm": buy_comm,
+                                        "high_price": today_high,
+                                        "entry_idx": i,
+                                        "trailing_activated": False,
+                                    }
+                                    trades.append({
+                                        "date": today_date, "side": "buy", "price": buy_price,
+                                        "qty": qty, "pnl": 0,
+                                        "reason": f"위기MR(RSI2={today_rsi2:.0f},{today_change_pct:+.1f}%)",
+                                        "strategy": "CRISIS_MR",
+                                    })
+                                    mr_trades += 1
 
             # 에쿼티 기록
             equity = cash
@@ -393,11 +709,13 @@ class BacktesterAuto:
                 equity += vb_pos["qty"] * today_close
             if trend_pos is not None:
                 equity += trend_pos["qty"] * today_close
+            if mr_pos is not None:
+                equity += mr_pos["qty"] * today_close
             equity_curve.append((today_date, equity))
 
         # ── 기간 종료: 잔여 포지션 청산 ──
         last_close = int(df.iloc[-1]["close"])
-        for label, pos in [("VB", vb_pos), ("TREND", trend_pos)]:
+        for label, pos in [("VB", vb_pos), ("TREND", trend_pos), ("CRISIS_MR", mr_pos)]:
             if pos is not None:
                 sell_price = self._cost.sell_execution_price(last_close, last_close, ticker)
                 sell_qty = pos["qty"]
@@ -417,9 +735,13 @@ class BacktesterAuto:
 
         stats = self._calc_stats(capital, cash, trades, equity_curve)
         stats["regime_days"] = regime_days
+        stats["stock_regime_days"] = stock_regime_days
         stats["vb_trades"] = vb_trades
         stats["trend_trades"] = trend_trades
+        stats["mr_trades"] = mr_trades
         stats["veto_count"] = veto_count
+        stats["eod_liquidation_count"] = eod_liquidation_count
+        stats["regime_blocked_count"] = regime_blocked_count
         return stats
 
     # ── 통계 계산 (backtester_v2 와 동일 로직) ─────────────
@@ -518,7 +840,7 @@ class BacktesterAuto:
         """AUTO 백테스트 결과 출력."""
         print("=" * 60)
         if ticker_name:
-            print(f"  {ticker_name} — AUTO 통합 백테스트 결과")
+            print(f"  {ticker_name} -- AUTO 통합 백테스트 결과")
         else:
             print("  AUTO 통합 백테스트 결과")
         print("=" * 60)
@@ -531,7 +853,10 @@ class BacktesterAuto:
         print(f"총 거래:          {stats.get('total_trades', 0)}회")
         print(f"  VB 매수:        {stats.get('vb_trades', 0)}회")
         print(f"  추세 매수:      {stats.get('trend_trades', 0)}회")
+        print(f"  위기MR 매수:    {stats.get('mr_trades', 0)}회")
         print(f"  거부권 발동:    {stats.get('veto_count', 0)}회")
+        print(f"  EOD 강제청산:   {stats.get('eod_liquidation_count', 0)}회")
+        print(f"  레짐 매수차단:  {stats.get('regime_blocked_count', 0)}회")
         print(f"승/패:            {stats.get('wins', 0)}/{stats.get('losses', 0)}")
         print(f"평균 수익:        {stats.get('avg_win', 0):,}원")
         print(f"평균 손실:        {stats.get('avg_loss', 0):,}원")
@@ -541,10 +866,11 @@ class BacktesterAuto:
         rd = stats.get("regime_days", {})
         total_days = sum(rd.values())
         if total_days > 0:
-            bull_pct = rd.get("bull", 0) / total_days * 100
-            bear_pct = rd.get("bear", 0) / total_days * 100
-            print(f"레짐 분포:        상승 {rd.get('bull', 0)}일({bull_pct:.0f}%) / "
-                  f"하락 {rd.get('bear', 0)}일({bear_pct:.0f}%)")
+            print(f"레짐 분포 (4-모드):")
+            for state in ["NORMAL", "SWING", "DEFENSE", "CASH"]:
+                d = rd.get(state, 0)
+                pct = d / total_days * 100
+                print(f"  {state:8s}: {d:>4}일 ({pct:>5.1f}%)")
         print("=" * 60)
 
 
@@ -572,6 +898,9 @@ def main() -> None:
     config = TradingConfig.from_env()
     bt = BacktesterAuto(config)
 
+    # ETF 코드 세트 (위기 MR 허용 판단)
+    etf_codes = {"069500", "229200", "133690", "131890", "108450", "395160", "261220", "132030"}
+
     tickers = {
         "069500.KS": "KODEX200",
         "229200.KS": "KODEX코스닥150",
@@ -583,22 +912,34 @@ def main() -> None:
         "006910.KS": "보성파워텍",
     }
 
+    # KOSPI 지수 proxy (레짐 판별용)
+    index_ticker = "^KS11"
+
     for label, period_args in [
         ("최근 1년", {"period": "1y"}),
         ("2022 하락장", {"start": "2022-01-01", "end": "2022-12-31"}),
     ]:
-        print(f"\n{'=' * 65}")
-        print(f"  {label} — AUTO 통합 (VB + 추세추종 + 거부권 + 레짐 전환)")
+        print(f"\n{'=' * 75}")
+        print(f"  {label} -- AUTO 통합 (VB + 추세추종 + 위기MR + 4-모드 레짐 + 거부권)")
         print(f"  손절={config.stoploss_pct}% | 트레일링={config.trailing_activate_pct}%"
-              f"→{config.trailing_stop_pct}% | VB-K={config.vb_k}/{config.vb_k_individual}")
-        print(f"{'=' * 65}")
+              f"->{config.trailing_stop_pct}% | VB-K={config.vb_k}/{config.vb_k_individual}"
+              f" | DEFENSE={config.regime_defense_trigger_pct}% CASH={config.regime_cash_trigger_pct}%")
+        print(f"{'=' * 75}")
+
+        # 지수 다운로드
+        index_df = download(index_ticker, **period_args)
+        if len(index_df) < 62:
+            print(f"  KOSPI 지수 데이터 부족 ({len(index_df)}일) -- 종목 데이터로 대체")
+            index_df = None
 
         total_pnl = 0
         total_vb = 0
         total_trend = 0
+        total_mr = 0
         total_veto = 0
-        combined_bull = 0
-        combined_bear = 0
+        total_eod = 0
+        total_blocked = 0
+        combined_regime = {"NORMAL": 0, "SWING": 0, "DEFENSE": 0, "CASH": 0}
 
         for yf_ticker, name in tickers.items():
             df = download(yf_ticker, **period_args)
@@ -607,7 +948,9 @@ def main() -> None:
                 continue
 
             code = yf_ticker.split(".")[0]
-            stats = bt.run(code, df)
+            ticker_is_etf = code in etf_codes
+
+            stats = bt.run(code, df, index_df=index_df, is_etf=ticker_is_etf)
 
             # 바이앤홀드 비교
             first_p = int(df.iloc[61]["close"])
@@ -618,31 +961,44 @@ def main() -> None:
             total_pnl += pnl
             total_vb += stats.get("vb_trades", 0)
             total_trend += stats.get("trend_trades", 0)
+            total_mr += stats.get("mr_trades", 0)
             total_veto += stats.get("veto_count", 0)
+            total_eod += stats.get("eod_liquidation_count", 0)
+            total_blocked += stats.get("regime_blocked_count", 0)
             rd = stats.get("regime_days", {})
-            combined_bull += rd.get("bull", 0)
-            combined_bear += rd.get("bear", 0)
+            for s in combined_regime:
+                combined_regime[s] += rd.get(s, 0)
 
             marker = ">" if stats["total_return_pct"] > 0 else " "
-            cost_pct = CostModel(config).roundtrip_cost_pct(first_p, code)
 
             print(
                 f" {marker} {name:12s} "
                 f"전략{stats['total_return_pct']:>+7.1f}% "
                 f"BnH{bnh:>+7.1f}% "
                 f"{stats['total_trades']:>3}거래 "
-                f"(VB{stats.get('vb_trades', 0):>2}/추세{stats.get('trend_trades', 0):>2}/거부{stats.get('veto_count', 0):>2}) "
+                f"(VB{stats.get('vb_trades', 0):>2}"
+                f"/추세{stats.get('trend_trades', 0):>2}"
+                f"/MR{stats.get('mr_trades', 0):>2}"
+                f"/거부{stats.get('veto_count', 0):>2}"
+                f"/EOD{stats.get('eod_liquidation_count', 0):>2}) "
                 f"승률{stats['win_rate_pct']:>4.0f}% "
                 f"MDD{stats['max_drawdown_pct']:>5.1f}% "
                 f"Sharpe{stats['sharpe_ratio']:>5.2f}"
             )
 
-        total_days = combined_bull + combined_bear
-        bull_pct = combined_bull / total_days * 100 if total_days > 0 else 0
-        bear_pct = combined_bear / total_days * 100 if total_days > 0 else 0
-        print(f"\n  합산 손익: {total_pnl:>+,}원")
-        print(f"  VB 매수: {total_vb}회 | 추세 매수: {total_trend}회 | 거부권: {total_veto}회")
-        print(f"  레짐 분포 (평균): 상승 {bull_pct:.0f}% / 하락 {bear_pct:.0f}%")
+        # ── 합산 서머리 ──
+        total_regime_days = sum(combined_regime.values())
+        print(f"\n  === 합산 서머리 ===")
+        print(f"  합산 손익: {total_pnl:>+,}원")
+        print(f"  VB: {total_vb}회 | 추세: {total_trend}회 | 위기MR: {total_mr}회")
+        print(f"  거부권 발동: {total_veto}회 | EOD 강제청산: {total_eod}회 | 레짐 차단: {total_blocked}회")
+        if total_regime_days > 0:
+            print(f"  레짐 분포 (4-모드, 전 종목 합산):")
+            for state in ["NORMAL", "SWING", "DEFENSE", "CASH"]:
+                d = combined_regime[state]
+                pct = d / total_regime_days * 100
+                bar = "#" * int(pct / 2)
+                print(f"    {state:8s}: {d:>5}일 ({pct:>5.1f}%) {bar}")
 
 
 if __name__ == "__main__":
