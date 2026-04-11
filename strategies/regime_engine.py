@@ -167,9 +167,19 @@ class RegimeEngine:
         Returns:
             현재 레짐 상태
         """
+        # 지수 데이터 추출 (KOSPI + KOSDAQ 모두 확인)
         kospi = index_data.get("KOSPI", {})
+        kosdaq = index_data.get("KOSDAQ", {})
         kospi_change = kospi.get("change_pct", 0.0)
         kospi_price = kospi.get("price", 0.0)
+        kosdaq_change = kosdaq.get("change_pct", 0.0)
+        # 두 지수 중 더 큰 하락폭 사용
+        worst_index_change = min(kospi_change, kosdaq_change)
+
+        # index_data가 비었으면 fail-safe: 현재 상태 유지 (fail-closed)
+        if not index_data or "KOSPI" not in index_data:
+            logger.warning("[레짐] 지수 데이터 없음 — 현재 상태(%s) 유지", self._current_state.value)
+            return self._current_state
 
         # config에서 임계값 가져오기
         defense_trigger = getattr(self._config, "regime_defense_trigger_pct", -2.0)
@@ -203,31 +213,29 @@ class RegimeEngine:
                     f"(기준: {cash_trigger}%)"
                 )
 
-        # DEFENSE 조건 (CASH가 아닐 때만)
+        # DEFENSE 조건 (CASH가 아닐 때만) — KOSPI/KOSDAQ 중 더 큰 하락 사용
         if new_state == RegimeState.NORMAL:
-            if kospi_change <= defense_trigger:
+            if worst_index_change <= defense_trigger:
+                idx_name = "KOSDAQ" if kosdaq_change < kospi_change else "KOSPI"
                 new_state = RegimeState.DEFENSE
-                reason = f"KOSPI {kospi_change:+.1f}% (기준: {defense_trigger}%)"
-            elif macro_regime_value == "caution" and kospi_change <= -1.5:
+                reason = f"{idx_name} {worst_index_change:+.1f}% (기준: {defense_trigger}%)"
+            elif macro_regime_value == "caution" and worst_index_change <= -1.5:
                 new_state = RegimeState.DEFENSE
-                reason = f"매크로 CAUTION + KOSPI {kospi_change:+.1f}%"
+                reason = f"매크로 CAUTION + 지수 {worst_index_change:+.1f}%"
 
         # SWING 조건 (DEFENSE/CASH가 아닐 때만)
         if new_state == RegimeState.NORMAL:
-            # MA20 아래 근사치: 변동률이 음수이고 일정 수준 이하
-            swing_volatility = getattr(
+            swing_trigger = getattr(
                 self._config, "regime_swing_volatility_pct", 3.0
             )
-            if kospi_change < -1.0:
+            # 히스테리시스: SWING 진입은 -1.5%, 복귀는 -0.5% 이상 회복
+            swing_entry_threshold = -1.5
+            if worst_index_change <= swing_entry_threshold:
                 new_state = RegimeState.SWING
-                reason = f"KOSPI {kospi_change:+.1f}% (하락 추세)"
-            # crisis_score 기반
-            elif hasattr(macro_status, "equity_ratio"):
-                equity_ratio = getattr(macro_status, "equity_ratio", 1.0)
-                # equity_ratio 0.7 이하 = crisis_score >= 1~2
-                if equity_ratio <= 0.7:
-                    new_state = RegimeState.SWING
-                    reason = f"매크로 주식비중 {equity_ratio*100:.0f}% (위험 감지)"
+                reason = f"지수 {worst_index_change:+.1f}% (SWING 기준: {swing_entry_threshold}%)"
+            elif macro_regime_value == "caution":
+                new_state = RegimeState.SWING
+                reason = f"매크로 CAUTION (위험 감지)"
 
         # NORMAL (default) - reason은 빈 문자열 유지
 
@@ -240,6 +248,9 @@ class RegimeEngine:
 
         if new_severity > cur_severity:
             # 위험 상승 -> 즉시 전환
+            # DEFENSE 진입 시 현재 KOSPI 가격 기록 (CASH 에스컬레이션용)
+            if new_state == RegimeState.DEFENSE and kospi_price > 0:
+                self._defense_index_price = kospi_price
             self._transition(new_state, reason)
         elif new_severity < cur_severity:
             # 위험 하강 -> 쿨다운 체크
@@ -269,16 +280,23 @@ class RegimeEngine:
         self._transition_reason = reason
 
         # DEFENSE 진입 시 지수 가격 기록 (CASH 전환 판단용)
-        if new_state == RegimeState.DEFENSE:
-            self._defense_index_price = None  # detect()에서 설정됨
+        # detect()에서 전달받은 kospi_price를 _transition 호출 전에 설정해야 하므로
+        # detect()에서 직접 설정하도록 함
         if new_state != RegimeState.DEFENSE:
             self._defense_index_price = None
 
-        # 쿨다운 설정 (디에스컬레이션 방지)
-        cooldown_min = getattr(
-            self._config, "regime_deescalation_cooldown_min", 30
-        )
-        self._cooldown_until = datetime.now() + timedelta(minutes=cooldown_min)
+        # 쿨다운 설정 (디에스컬레이션에만 적용, 에스컬레이션은 쿨다운 안 걸음)
+        new_sev = _SEVERITY[new_state]
+        old_sev = _SEVERITY[old_state]
+        if new_sev < old_sev:
+            # 디에스컬레이션 → 쿨다운 설정
+            cooldown_min = getattr(
+                self._config, "regime_deescalation_cooldown_min", 30
+            )
+            # CASH 탈출은 더 긴 쿨다운 (60분)
+            if old_state == RegimeState.CASH:
+                cooldown_min = max(cooldown_min, 60)
+            self._cooldown_until = datetime.now() + timedelta(minutes=cooldown_min)
 
         logger.warning(
             "[레짐 전환] %s -> %s (사유: %s)",
