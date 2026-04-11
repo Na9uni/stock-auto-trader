@@ -136,6 +136,15 @@ from alerts.order_manager import (                   # noqa: F401
     _parse_dt,
 )
 
+from config.theme_detector import (                  # noqa: F401
+    check_theme_leaders,
+    detect_theme_leaders,
+    detect_volume_surge,
+    detect_institutional_flow,
+    detect_52week_high,
+    detect_relative_strength,
+)
+
 # ---------------------------------------------------------------------------
 # 서브모듈 설정 주입
 # ---------------------------------------------------------------------------
@@ -216,6 +225,7 @@ def run_scheduler() -> None:
     schedule.every().day.at("09:00").do(send_market_open)
     schedule.every().day.at("15:40").do(send_market_close)
     schedule.every().hour.at(":00").do(send_news_update)
+    schedule.every().hour.at(":30").do(check_theme_leaders)
     schedule.every().day.at("16:00").do(send_daily_report)
     schedule.every().day.at("06:00").do(_prune_order_queue)
 
