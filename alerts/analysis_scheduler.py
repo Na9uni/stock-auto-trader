@@ -145,6 +145,10 @@ from config.theme_detector import (                  # noqa: F401
     detect_relative_strength,
 )
 
+from analysis.improvement_cycle import (             # noqa: F401
+    run_improvement_cycle,
+)
+
 # ---------------------------------------------------------------------------
 # 서브모듈 설정 주입
 # ---------------------------------------------------------------------------
@@ -227,6 +231,7 @@ def run_scheduler() -> None:
     schedule.every().hour.at(":00").do(send_news_update)
     schedule.every().hour.at(":30").do(check_theme_leaders)
     schedule.every().day.at("16:00").do(send_daily_report)
+    schedule.every().friday.at("16:00").do(run_improvement_cycle)
     schedule.every().day.at("06:00").do(_prune_order_queue)
 
     while True:
