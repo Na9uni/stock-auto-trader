@@ -116,10 +116,13 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
     from alerts.file_io import save_auto_positions
 
     if not AUTO_TRADE_ENABLED:
+        logger.debug("[자동매매] %s 차단: 자동매매 비활성화", name)
         return
     if OPERATION_MODE not in ("LIVE", "MOCK"):
+        logger.debug("[자동매매] %s 차단: 운영모드 %s (LIVE/MOCK 아님)", name, OPERATION_MODE)
         return
     if not is_whitelisted(ticker):
+        logger.debug("[자동매매] %s 차단: 화이트리스트 미포함", name)
         return
 
     # ── 시간 제한 (TradingConfig 기반) ──
@@ -137,6 +140,7 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
 
     # ── 서킷브레이커/급락 대응 ──
     if signal.signal_type == SignalType.BUY and _is_market_crash():
+        logger.debug("[자동매매] %s 차단: 시장 급락 감지", name)
         return
 
     # ── 매수 ──
@@ -166,10 +170,13 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
         auto_positions = {k: v for k, v in positions.items() if not v.get("manual", False)}
         if ticker in auto_positions or ticker in _buy_in_progress:
             if ticker in auto_positions and auto_positions[ticker].get("selling"):
+                logger.debug("[자동매매] %s 차단: 매도 진행 중", name)
                 return
             if ticker in auto_positions:
+                logger.debug("[자동매매] %s 차단: 이미 보유 중", name)
                 return
             if ticker in _buy_in_progress:
+                logger.debug("[자동매매] %s 차단: 매수 접수 진행 중", name)
                 return
 
         # 필터 체크
@@ -191,6 +198,7 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
             return
 
         _buy_in_progress.add(ticker)
+        logger.debug("[자동매매] %s 매수 진행: qty=%d, price=%s, mode=%s", name, quantity, f"{price:,}", OPERATION_MODE)
 
         if OPERATION_MODE == "MOCK":
             # 분할 매수: 1차 60% 즉시, 2차 40% 보류

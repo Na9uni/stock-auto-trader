@@ -23,15 +23,32 @@ load_dotenv(ROOT / ".env")
 (ROOT / "logs").mkdir(parents=True, exist_ok=True)
 logger = logging.getLogger("stock_analysis")
 if not logger.handlers:
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)  # 로거 자체는 DEBUG (핸들러별 레벨 제어)
     _fh = logging.FileHandler(
         str(ROOT / "logs" / "stock_analysis.log"), encoding="utf-8"
     )
+    _fh.setLevel(logging.INFO)
     _fh.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s %(message)s"))
     _ch = logging.StreamHandler()
+    _ch.setLevel(logging.INFO)
     _ch.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     logger.addHandler(_fh)
     logger.addHandler(_ch)
+
+    # 디버그 로그: 모든 판단 과정 기록 (문제 추적용)
+    from logging.handlers import TimedRotatingFileHandler
+    _debug_handler = TimedRotatingFileHandler(
+        str(ROOT / "logs" / "debug.log"),
+        when="midnight",
+        interval=1,
+        backupCount=7,
+        encoding="utf-8",
+    )
+    _debug_handler.setLevel(logging.DEBUG)
+    _debug_handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(name)s] %(levelname)s %(message)s"
+    ))
+    logger.addHandler(_debug_handler)
 
 KIWOOM_DATA_PATH = ROOT / "data" / "kiwoom_data.json"
 AUTO_POSITIONS_PATH = ROOT / "data" / "auto_positions.json"

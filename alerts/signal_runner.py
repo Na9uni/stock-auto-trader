@@ -104,6 +104,12 @@ def _build_market_context(
                 intraday_high = int(today_bars["high"].max())
         # 날짜 필터 실패 시 intraday_high=0 유지 (이전 세션 고가로 false breakout 방지)
 
+    logger.debug(
+        "[신호] %s 컨텍스트 생성: 현재가=%s, 일봉=%d개, 5분봉=%d개, 장중고가=%s",
+        name, f"{current_price:,}", len(candles_1d),
+        len(candles_5m_for_veto) if candles_5m_for_veto is not None and not candles_5m_for_veto.empty else 0,
+        f"{intraday_high:,}",
+    )
     return MarketContext(
         ticker=ticker,
         name=name,
@@ -123,21 +129,30 @@ def _process_signal(
     signal: SignalResult, notifier, ai, now: datetime,
 ) -> None:
     """신호 처리: 알림 + AI + 매매 (BUY/SELL 공통)."""
+    logger.debug(
+        "[신호] %s 전략결과: %s %s (score=%.1f, 사유=%s)",
+        name, signal.signal_type.value, signal.strength.value if hasattr(signal.strength, 'value') else signal.strength.name,
+        signal.score, "; ".join(signal.reasons[:2]) if signal.reasons else "없음",
+    )
     if signal.signal_type == SignalType.NEUTRAL:
         return
     if signal.strength != SignalStrength.STRONG:
+        logger.debug("[신호] %s 강도 부족 (%s != STRONG) → 매매 스킵", name, signal.strength.name)
         return
 
     # 매수 시간 제한
     if signal.signal_type == SignalType.BUY:
         if now.hour >= _TRADING_CONFIG.buy_end_hour:
+            logger.debug("[신호] %s 매수 시간 초과 (%d시 >= %d시) → 스킵", name, now.hour, _TRADING_CONFIG.buy_end_hour)
             return
         if now.hour == 9 and now.minute < _TRADING_CONFIG.buy_start_minute:
+            logger.debug("[신호] %s 장 시작 %d분 미만 → 매수 보류", name, _TRADING_CONFIG.buy_start_minute)
             return
 
     # 쿨다운
     ck = f"{_STRATEGY.name}_{ticker}"
     if not cooldown_ok(ck, signal.signal_type, signal.strength):
+        logger.debug("[신호] %s 쿨다운 중 → 스킵", name)
         return
 
     # AI 분석 (매수 신호만)
@@ -257,6 +272,7 @@ def check_signals() -> None:
     kospi_candles = data.get("stocks", {}).get("069500", {}).get("candles_1d", [])
     regime = engine.detect(index_data, macro_status, kospi_candles=kospi_candles)
     regime_params = engine.params
+    logger.debug("[신호] 레짐: %s, 파라미터: slots=%d, buy=%s", regime.value, regime_params.max_slots, regime_params.buy_allowed)
 
     # CASH: 전량 청산, 매매 금지
     if regime == RegimeState.CASH:

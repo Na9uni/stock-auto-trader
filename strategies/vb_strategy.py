@@ -76,21 +76,27 @@ class VBStrategy:
 
         # 0) 시장 레짐 필터: MA20 > MA60 (상승장만 진입) — 백테스트와 동일
         if ma20 > 0 and ma60 > 0 and ma20 < ma60:
+            logger.debug("[VB] %s 레짐필터 실패 (MA20 %.0f < MA60 %.0f)", ctx.name, ma20, ma60)
             return self._neutral(
                 f"레짐필터 실패 (MA20 {ma20:,.0f} < MA60 {ma60:,.0f})"
             )
+        logger.debug("[VB] %s 레짐필터 통과 (MA20 %.0f > MA60 %.0f)", ctx.name, ma20, ma60)
 
         # 1) 마켓 필터: 시가 > MA10
         if today_open <= ma10:
+            logger.debug("[VB] %s 마켓필터 실패 (시가 %s <= MA10 %.0f)", ctx.name, f"{today_open:,}", ma10)
             return self._neutral(
                 f"마켓필터 실패 (시가 {today_open:,} <= MA10 {ma10:,.0f})"
             )
+        logger.debug("[VB] %s 마켓필터 통과 (시가 %s > MA10 %.0f)", ctx.name, f"{today_open:,}", ma10)
 
         # 2) 변동성 필터: 전일 레인지 >= 시가의 0.5%
         if prev_range < today_open * 0.005:
+            logger.debug("[VB] %s 변동성필터 실패 (range=%s < 시가 %s의 0.5%%)", ctx.name, f"{prev_range:,}", f"{today_open:,}")
             return self._neutral(
                 f"변동성 부족 (range={prev_range:,} < 0.5%)"
             )
+        logger.debug("[VB] %s 변동성필터 통과 (range=%s)", ctx.name, f"{prev_range:,}")
 
         # 3) 가격-RSI 다이버전스: 가격 신고가인데 RSI 하락 → 거짓 돌파 경고
         if len(df) >= 15:
@@ -106,13 +112,16 @@ class VBStrategy:
                 rsi_lower = float(_rsi.iloc[-2]) < float(_rsi.iloc[-6])
 
                 if price_higher and rsi_lower and float(_rsi.iloc[-2]) > 65:
+                    logger.debug("[VB] %s 다이버전스 감지 (가격 신고가 but RSI 하락 %.0f)", ctx.name, float(_rsi.iloc[-2]))
                     return self._neutral(
                         f"베어리시 다이버전스 (가격 신고가 but RSI 하락 {_rsi.iloc[-2]:.0f})"
                     )
+                logger.debug("[VB] %s 다이버전스 체크 통과 (RSI=%.0f)", ctx.name, float(_rsi.iloc[-2]))
 
         # 4) 목표가 돌파 확인 (현재가 또는 당일 장중 고가)
         # 쿨다운이 중복 진입을 방지하므로 intraday_high 사용 가능
         check_price = max(ctx.current_price, ctx.intraday_high) if ctx.intraday_high > 0 else ctx.current_price
+        logger.debug("[VB] %s 목표가 체크: 현재가 %s vs 목표가 %s (K=%.2f)", ctx.name, f"{check_price:,}", f"{target_price:,}", k)
         if check_price >= target_price:
             # 거래량 확인: 전일 거래량이 5일 평균의 50% 이상이어야 함
             if "volume" in df.columns and len(df) >= 6:
@@ -120,15 +129,21 @@ class VBStrategy:
                 prev_vol = int(yesterday.get("volume", 0))
                 avg_vol = float(df["volume"].tail(6).head(5).mean())
                 if avg_vol > 0 and prev_vol < avg_vol * 0.5:
+                    logger.debug("[VB] %s 거래량 부족 (전일 %s < 평균 %.0f의 50%%)", ctx.name, f"{prev_vol:,}", avg_vol)
                     return self._neutral(f"거래량 부족 (전일 {prev_vol:,} < 평균 {avg_vol:,.0f}의 50%)")
+                logger.debug("[VB] %s 거래량 통과 (전일 %s / 평균 %.0f)", ctx.name, f"{prev_vol:,}", avg_vol)
 
             # 5) 체결강도 필터: 매수세 > 매도세 확인
             # exec_strength: 100 = 매수/매도 동일, 100+ = 매수 우세, 100- = 매도 우세
             if ctx.exec_strength > 0:  # 0이면 데이터 없음 → 스킵
                 if ctx.exec_strength < 100:
+                    logger.debug("[VB] %s 체결강도 부족 (%.0f%% < 100%%)", ctx.name, ctx.exec_strength)
                     return self._neutral(
                         f"체결강도 부족 ({ctx.exec_strength:.0f}% < 100%)"
                     )
+                logger.debug("[VB] %s 체결강도 통과 (%.0f%%)", ctx.name, ctx.exec_strength)
+            else:
+                logger.debug("[VB] %s 체결강도 데이터 없음 — 스킵", ctx.name)
 
             # 6) 호가창 불균형: 매수 잔량 > 매도 잔량 확인
             if ctx.orderbook:
@@ -141,11 +156,15 @@ class VBStrategy:
                         if sell_qty > 0:
                             imbalance = buy_qty / sell_qty
                             if imbalance < 0.7:  # 매도 잔량이 매수의 1.4배 이상
+                                logger.debug("[VB] %s 호가 불균형 (매수/매도 비율 %.1f, 매도 우세)", ctx.name, imbalance)
                                 return self._neutral(
                                     f"호가 불균형 (매수/매도 비율 {imbalance:.1f}, 매도 우세)"
                                 )
+                            logger.debug("[VB] %s 호가창 통과 (매수/매도 비율 %.1f)", ctx.name, imbalance)
                 except (ValueError, TypeError, KeyError):
                     pass  # 호가 데이터 불완전 시 필터 스킵
+            else:
+                logger.debug("[VB] %s 호가창 데이터 없음 — 스킵", ctx.name)
 
             # 7) 시간대별 신호 품질 필터
             # 09:10~09:30 초반 변동성 구간: 거짓 돌파 위험 → MEDIUM으로 강도 하향
@@ -163,6 +182,10 @@ class VBStrategy:
                 _time_strength = SignalStrength.MEDIUM
                 _time_note = " (점심시간 저유동성 주의)"
 
+            logger.debug(
+                "[VB] %s *** 매수 신호 발생! K=%.2f 목표가=%s 강도=%s%s",
+                ctx.name, k, f"{target_price:,}", _time_strength.name, _time_note,
+            )
             return SignalResult(
                 signal_type=SignalType.BUY,
                 strength=_time_strength,
