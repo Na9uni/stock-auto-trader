@@ -76,14 +76,10 @@ def screen_ticker(ticker: str, info: dict, candles_1d: list[dict]) -> tuple[bool
         if consecutive_down:
             return False, "5일 연속 음봉 (하락 추세)"
 
-    # ── 5. 이동평균 역배열 필터: MA5 < MA20 < MA60 → 하락 추세 ──
-    if len(df) >= 61:
-        ma5 = float(df["close"].tail(6).head(5).mean())
-        ma20 = float(df["close"].tail(21).head(20).mean())
-        ma60 = float(df["close"].tail(61).head(60).mean())
-        if ma5 > 0 and ma20 > 0 and ma60 > 0:
-            if ma5 < ma20 < ma60:
-                return False, f"이평선 역배열 (MA5 {ma5:,.0f} < MA20 {ma20:,.0f} < MA60 {ma60:,.0f})"
+    # ── 5. 이동평균 역배열 필터: 제거 ──
+    # AUTO 전략의 _detect_regime()이 이미 MA20/MA60 레짐 판단을 하므로
+    # 스크리너에서 중복 체크 시 시장 조정기에 전 종목 차단되는 문제 발생.
+    # 레짐 필터는 전략 레벨에서만 적용.
 
     # ── 6. 거래대금 트렌드: 5일 평균 거래대금 감소 추세 → 관심 이탈 ──
     if len(df) >= 10 and "volume" in df.columns:
