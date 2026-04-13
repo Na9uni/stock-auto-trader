@@ -249,7 +249,7 @@ def _check_crisis_meanrev(data: dict) -> None:
             if _kd:
                 _balance = int(_kd.get("account", {}).get("total_eval", 0))
                 if 0 < _balance < 100000:  # 10만원 미만이면 차단
-                    logger.warning("[킬스위치] 계좌 %s원 < 63만원 — 매매 중단", f"{_balance:,}")
+                    logger.warning("[킬스위치] 계좌 %s원 < 10만원 — 매매 중단", f"{_balance:,}")
                     continue
         except Exception:
             pass

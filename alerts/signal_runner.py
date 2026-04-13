@@ -53,11 +53,6 @@ from alerts.notifications import (
     build_signal_header,
 )
 
-from alerts.crisis_manager import (
-    _restore_crisis_mr_position,
-    _check_crisis_meanrev,
-)
-
 
 # ---------------------------------------------------------------------------
 # 공통 헬퍼

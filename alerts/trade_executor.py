@@ -83,13 +83,23 @@ def _calc_trade_amount() -> int:
         if balance <= 0 and MOCK_MODE:
             # MOCK 모드에서 예수금 0이면 AUTO_TRADE_AMOUNT 사용
             return AUTO_TRADE_AMOUNT
+
+        # 레짐별 max_slots 오버라이드
+        effective_max_slots = MAX_SLOTS
+        try:
+            from strategies.regime_engine import get_regime_engine
+            _rp = get_regime_engine().params
+            effective_max_slots = min(MAX_SLOTS, _rp.max_slots)
+        except Exception:
+            pass
+
         # manual 포지션은 슬롯에서 제외
         all_pos = load_auto_positions()
         auto_count = sum(1 for p in all_pos.values() if not p.get("manual", False))
         holding_count = auto_count + len(_buy_in_progress)
-        free_slots = MAX_SLOTS - holding_count
+        free_slots = effective_max_slots - holding_count
         if free_slots <= 0:
-            logger.info("[시드머니] 슬롯 꽉참 (%d/%d)", holding_count, MAX_SLOTS)
+            logger.info("[시드머니] 슬롯 꽉참 (%d/%d)", holding_count, effective_max_slots)
             return 0
         amount = balance // free_slots
         if amount > MAX_ORDER_AMOUNT:
