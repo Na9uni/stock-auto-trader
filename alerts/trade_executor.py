@@ -243,7 +243,7 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
             try:
                 from strategies.regime_engine import get_regime_engine
                 _regime = get_regime_engine().state.value
-                _strategy_tag = "trend_following" if _regime in ("bear", "swing", "defense") else "vb"
+                _strategy_tag = "trend_following" if _regime in ("swing", "defense", "cash") else "vb"
             except Exception:
                 _strategy_tag = ""
             positions = load_auto_positions()

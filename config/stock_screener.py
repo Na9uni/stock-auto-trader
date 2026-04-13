@@ -7,7 +7,6 @@ signal_runner.py의 _build_market_context()에서 호출.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 import pandas as pd
 
@@ -19,13 +18,12 @@ def screen_ticker(ticker: str, info: dict, candles_1d: list[dict]) -> tuple[bool
 
     조건 미충족 시 (False, 사유) → 매매 대상에서 제외.
 
-    필터 목록:
-      1. 시가총액: 너무 작은 종목 제외 (유동성 부족)
-      2. 거래대금: 일 거래대금 1억 미만 제외
-      3. 이동평균 정배열: MA5 > MA20 > MA60 확인 (상승 추세)
-      4. 스프레드: 호가 스프레드 1% 초과 제외
-      5. 급등/급락 필터: 전일 등락률 ±15% 초과 제외 (비정상 변동)
-      6. 연속 하락: 5일 연속 하락 제외
+    필터 목록 (5겹):
+      1. 거래대금: 일 거래대금 1억 미만 제외
+      2. 스프레드: 호가 스프레드 1% 초과 제외
+      3. 급등/급락 필터: 전일 등락률 ±15% 초과 제외 (비정상 변동)
+      4. 연속 하락: 5일 연속 음봉 제외
+      5. 거래대금 트렌드: 5일/10일 거래량 비율 30% 미만 제외
     """
     current_price = int(info.get("current_price", 0))
     if current_price <= 0:

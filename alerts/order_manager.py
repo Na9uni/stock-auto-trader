@@ -364,7 +364,7 @@ def _handle_buy_execution(order: dict, name: str) -> None:
             try:
                 from strategies.regime_engine import get_regime_engine
                 _regime = get_regime_engine().state.value
-                _strategy_tag = "trend_following" if _regime in ("bear", "swing", "defense") else "vb"
+                _strategy_tag = "trend_following" if _regime in ("swing", "defense", "cash") else "vb"
             except Exception:
                 _strategy_tag = rule_name.split("_")[0] if "_" in rule_name else ""
             positions[ticker] = {
