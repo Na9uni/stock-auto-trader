@@ -122,19 +122,19 @@ def assess_macro(
     if crisis_score >= 5:
         regime = MacroRegime.CRISIS
         equity_ratio = 0.5          # 50%는 위기 수혜 ETF, 50% 현금
-        allowed = ["crisis_rotation"]  # 위기 전용 전략만
+        allowed = []  # CRISIS: 레짐 엔진이 제어
     elif crisis_score >= 3:
         regime = MacroRegime.CAUTION
         equity_ratio = 0.5
-        allowed = ["crisis_rotation", "momentum_rotation"]
+        allowed = []  # CAUTION: 레짐 엔진이 제어
     elif crisis_score >= 1:
         regime = MacroRegime.NORMAL
         equity_ratio = 0.7
-        allowed = ["momentum_rotation", "vb", "connors_rsi", "combo"]
+        allowed = []
     else:
         regime = MacroRegime.NORMAL
         equity_ratio = 1.0
-        allowed = ["momentum_rotation", "vb", "connors_rsi", "combo"]
+        allowed = []
 
     if not reasons:
         reasons.append("매크로 정상")

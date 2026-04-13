@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from unittest.mock import patch
 
 import pytest
 
@@ -15,19 +14,9 @@ class TestRegimeEngine:
     """RegimeEngine 핵심 로직 테스트."""
 
     def _make_engine(self) -> RegimeEngine:
-        """매 테스트마다 새 엔진 생성. 상태 파일 로드를 우회한다."""
+        """매 테스트마다 새 엔진 생성 (silent=True: 텔레그램/상태파일 비활성)."""
         config = TradingConfig.from_env()
-        with patch.object(RegimeEngine, "_load_state"):
-            engine = RegimeEngine(config)
-        # _load_state가 스킵되었으므로 초기값 수동 설정
-        engine._current_state = RegimeState.NORMAL
-        engine._prev_state = None
-        engine._state_entered_at = datetime.now()
-        engine._defense_index_price = None
-        engine._cooldown_until = None
-        engine._transition_reason = ""
-        engine._recent_changes = []
-        return engine
+        return RegimeEngine(config, silent=True)
 
     def _macro_ok(self) -> MacroStatus:
         """정상 매크로 상태."""

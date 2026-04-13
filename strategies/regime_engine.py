@@ -61,7 +61,6 @@ class RegimeParams:
     trailing_stop_pct: float        # 트레일링 스탑 폭 (%)
     buy_allowed: bool               # 신규 매수 허용 여부
     force_liquidate_pct: float      # 기존 포지션 강제 청산 비율 (0.0~1.0)
-    eod_liquidate: bool             # 장 마감 전 전량 청산 여부
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +76,6 @@ REGIME_PARAMS: dict[RegimeState, RegimeParams] = {
         trailing_stop_pct=1.0,
         buy_allowed=True,
         force_liquidate_pct=0.0,
-        eod_liquidate=True,
     ),
     RegimeState.SWING: RegimeParams(
         position_size_pct=0.5,
@@ -87,7 +85,6 @@ REGIME_PARAMS: dict[RegimeState, RegimeParams] = {
         trailing_stop_pct=0.8,
         buy_allowed=True,
         force_liquidate_pct=0.0,
-        eod_liquidate=True,
     ),
     RegimeState.DEFENSE: RegimeParams(
         position_size_pct=0.3,
@@ -97,7 +94,6 @@ REGIME_PARAMS: dict[RegimeState, RegimeParams] = {
         trailing_stop_pct=0.5,
         buy_allowed=False,
         force_liquidate_pct=0.5,
-        eod_liquidate=True,
     ),
     RegimeState.CASH: RegimeParams(
         position_size_pct=0.0,
@@ -107,7 +103,6 @@ REGIME_PARAMS: dict[RegimeState, RegimeParams] = {
         trailing_stop_pct=0.3,
         buy_allowed=False,
         force_liquidate_pct=1.0,
-        eod_liquidate=True,
     ),
 }
 
@@ -124,13 +119,15 @@ class RegimeEngine:
     레짐 변경 시 텔레그램 알림 + JSON 상태 저장.
     """
 
-    def __init__(self, config: object) -> None:
+    def __init__(self, config: object, silent: bool = False) -> None:
         """초기화.
 
         Args:
             config: TradingConfig 인스턴스
+            silent: True이면 텔레그램 알림/상태 저장 비활성화 (테스트용)
         """
         self._config = config
+        self._silent = silent
         self._current_state = RegimeState.NORMAL
         self._prev_state: RegimeState | None = None
         self._state_entered_at = datetime.now()
@@ -416,6 +413,8 @@ class RegimeEngine:
         reason: str,
     ) -> None:
         """레짐 전환 텔레그램 알림."""
+        if self._silent:
+            return
         try:
             from alerts.telegram_notifier import TelegramNotifier
 
@@ -440,6 +439,8 @@ class RegimeEngine:
 
     def _save_state(self) -> None:
         """data/regime_state.json에 현재 상태 atomic write."""
+        if self._silent:
+            return
         data = {
             "state": self._current_state.value,
             "prev_state": self._prev_state.value if self._prev_state else None,
@@ -473,6 +474,8 @@ class RegimeEngine:
 
         12시간 이상 경과했거나 다른 날짜면 NORMAL로 리셋.
         """
+        if self._silent:
+            return
         if not _STATE_PATH.exists():
             logger.info("[레짐] 상태 파일 없음 -> NORMAL 시작")
             return

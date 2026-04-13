@@ -40,7 +40,7 @@ AUTO_TRADE_AMOUNT: int = 0
 MAX_ORDER_AMOUNT: int = 0
 MAX_SLOTS: int = 0
 _buy_start_minute: int = 10
-_buy_end_hour: int = 14
+_buy_end_hour: int = 15
 
 
 def _configure(
