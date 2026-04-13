@@ -27,7 +27,8 @@ logger = logging.getLogger("stock_analysis")
 # 위기MR 상태
 # ---------------------------------------------------------------------------
 
-_CRISIS_MR_TARGETS = ["069500", "229200"]  # KODEX200, 코스닥150
+# 069500 (KODEX200) 제거: 화이트리스트에서 제외됨
+_CRISIS_MR_TARGETS = ["229200"]  # KODEX 코스닥150
 _crisis_mr_position: dict | None = None
 
 
@@ -247,7 +248,7 @@ def _check_crisis_meanrev(data: dict) -> None:
             _kd = _load_kd()
             if _kd:
                 _balance = int(_kd.get("account", {}).get("total_eval", 0))
-                if 0 < _balance < 630000:  # 70만원의 90%
+                if 0 < _balance < 100000:  # 10만원 미만이면 차단
                     logger.warning("[킬스위치] 계좌 %s원 < 63만원 — 매매 중단", f"{_balance:,}")
                     continue
         except Exception:

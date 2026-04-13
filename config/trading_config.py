@@ -22,8 +22,8 @@ class TradingConfig:
     auto_trade_enabled: bool = False
 
     # 포지션
-    auto_trade_amount: int = 500_000
-    max_order_amount: int = 1_000_000
+    auto_trade_amount: int = 150_000
+    max_order_amount: int = 300_000
     max_slots: int = 2
 
     # 손절/익절 (%)
@@ -49,7 +49,7 @@ class TradingConfig:
     vb_k_individual: float = 0.6       # 개별주 K값 (노이즈 필터링 강화)
 
     # 전략 선택: "vb" | "score" | "combo" | "trend" | "auto"
-    strategy: str = "combo"
+    strategy: str = "auto"
 
     # 시간 제한
     buy_start_minute: int = 10         # 장 시작 후 N분 뒤부터 매수 허용
@@ -68,8 +68,8 @@ class TradingConfig:
             operation_mode=os.getenv("OPERATION_MODE", "OBSERVE").upper(),
             mock_mode=os.getenv("KIWOOM_MOCK_MODE", "True").lower() == "true",
             auto_trade_enabled=os.getenv("AUTO_TRADE_ENABLED", "false").lower() == "true",
-            auto_trade_amount=int(os.getenv("AUTO_TRADE_AMOUNT", "500000")),
-            max_order_amount=int(os.getenv("MAX_ORDER_AMOUNT", "1000000")),
+            auto_trade_amount=int(os.getenv("AUTO_TRADE_AMOUNT", "150000")),
+            max_order_amount=int(os.getenv("MAX_ORDER_AMOUNT", "300000")),
             max_slots=int(os.getenv("MAX_SLOTS", "2")),
             stoploss_pct=float(os.getenv("STOPLOSS_PCT", "2.0")),
             trailing_activate_pct=float(os.getenv("TRAILING_ACTIVATE_PCT", "2.5")),
@@ -83,7 +83,7 @@ class TradingConfig:
             strong_threshold_daily=int(os.getenv("STRONG_THRESHOLD_DAILY", "7")),
             vb_k=float(os.getenv("VB_K", "0.5")),
             vb_k_individual=float(os.getenv("VB_K_INDIVIDUAL", "0.6")),
-            strategy=os.getenv("STRATEGY", "combo").lower(),
+            strategy=os.getenv("STRATEGY", "auto").lower(),
             buy_start_minute=int(os.getenv("BUY_START_MINUTE", "10")),
             buy_end_hour=int(os.getenv("BUY_END_HOUR", "15")),
             regime_defense_trigger_pct=float(os.getenv("REGIME_DEFENSE_TRIGGER_PCT", "-2.0")),

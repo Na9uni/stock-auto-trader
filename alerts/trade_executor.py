@@ -229,6 +229,13 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
                 f"⚠️ 모의투자"
                 + CMD_FOOTER,
             )
+            # Determine strategy mode from regime (EOD liquidation용)
+            try:
+                from strategies.regime_engine import get_regime_engine
+                _regime = get_regime_engine().state.value
+                _strategy_tag = "trend_following" if _regime in ("bear", "swing", "defense") else "vb"
+            except Exception:
+                _strategy_tag = ""
             positions = load_auto_positions()
             positions[ticker] = {
                 "name": name,
@@ -239,6 +246,7 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
                 "mock": True,
                 "split_remaining": remaining_qty,  # 2차 매수 대기
                 "split_price": price,  # 1차 매수가 기록
+                "strategy": _strategy_tag,
             }
             save_auto_positions(positions)
             _buy_in_progress.discard(ticker)
