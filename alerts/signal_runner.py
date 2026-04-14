@@ -690,3 +690,64 @@ def check_premarket_us() -> None:
         "[개장전 US 체크] S&P500 %+.1f%%, NASDAQ %+.1f%% → 레짐 %s",
         sp500_change, nasdaq_change, regime.value,
     )
+
+
+# ---------------------------------------------------------------------------
+# 30분 정상 작동 알림 (아빠 요청)
+# ---------------------------------------------------------------------------
+
+def check_heartbeat() -> None:
+    """30분마다: 시스템 정상 작동 알림 텔레그램 발송."""
+    from alerts.market_guard import is_market_hours
+    if not is_market_hours():
+        return
+
+    from alerts._state import _STRATEGY, _TRADING_CONFIG
+    from alerts.file_io import load_auto_positions, load_kiwoom_data
+    from strategies.regime_engine import get_regime_engine, RegimeState
+
+    try:
+        engine = get_regime_engine()
+        regime = engine.state
+        regime_emoji = {
+            RegimeState.NORMAL: "🟢",
+            RegimeState.SWING: "🟡",
+            RegimeState.DEFENSE: "🟠",
+            RegimeState.CASH: "🔴",
+        }
+
+        positions = load_auto_positions()
+        auto_count = sum(1 for p in positions.values() if not p.get("manual"))
+        manual_count = sum(1 for p in positions.values() if p.get("manual"))
+
+        # 오늘 매매 건수 (trade_journal에서)
+        today_buys = 0
+        today_sells = 0
+        today_pnl = 0
+        try:
+            from trading.trade_journal import get_daily_summary
+            summary = get_daily_summary()
+            today_buys = summary.get("buys", 0)
+            today_sells = summary.get("sells", 0)
+            today_pnl = summary.get("pnl", 0)
+        except Exception:
+            pass
+
+        from datetime import datetime
+        now = datetime.now()
+
+        emoji = regime_emoji.get(regime, "⚪")
+        msg = (
+            f"✅ [정상 작동 중] {now.strftime('%H:%M')}\n"
+            f"레짐: {emoji} {regime.value.upper()}\n"
+            f"보유: 자동 {auto_count}종목 / manual {manual_count}종목\n"
+            f"오늘: 매수 {today_buys}건 / 매도 {today_sells}건"
+        )
+        if today_pnl != 0:
+            msg += f" / 손익 {today_pnl:+,}원"
+
+        notifier = TelegramNotifier()
+        notifier.send_to_users([get_admin_id()], msg)
+        logger.info("[하트비트] 정상 작동 알림 발송")
+    except Exception as e:
+        logger.error("[하트비트] 알림 실패: %s", e)
