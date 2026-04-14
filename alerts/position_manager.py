@@ -129,6 +129,7 @@ def check_auto_positions() -> None:
         return
 
     from trading.auto_trader import execute_sell
+    from alerts.trade_executor import OPERATION_MODE
 
     positions = _cleanup_failed_positions(load_auto_positions())
     if not positions:
@@ -293,20 +294,41 @@ def check_auto_positions() -> None:
             # 분할 익절: 보유 수량의 50% 매도
             half_qty = qty // 2
             if half_qty > 0:
-                sell_res = execute_sell(ticker, name, half_qty,
-                                        current_price, rule_name="자동청산_분할익절")
-                if sell_res.get("status") == "pending":
-                    positions[ticker]["partial_sell_qty"] = half_qty
-                    positions[ticker]["partial_sell_order_id"] = sell_res.get("order_id", "")
-                    # qty는 체결 확인 후 줄임 (check_order_status에서 처리)
-                    # selling 플래그는 안 세움 (나머지는 트레일링으로 관리)
-                    logger.info("[분할 익절] %s %d주 매도 접수 (수익 %.1f%%)", name, half_qty, pct)
+                if OPERATION_MODE == "MOCK":
+                    # MOCK: 가상 분할 익절
+                    pnl_half = (current_price - buy_price) * half_qty
+                    positions[ticker]["qty"] = qty - half_qty
+                    changed = True
+                    logger.info("[가상 분할익절] %s %d주 @%s (수익 %.1f%%, 손익 %+d)", name, half_qty, f"{current_price:,}", pct, pnl_half)
                     notifier.send_to_users(
                         [get_admin_id()],
-                        f"📊 [분할 익절] {name}\n"
-                        f"수량: {half_qty}주 / 수익: {pct:+.1f}%\n"
-                        f"잔여 {qty - half_qty}주 트레일링 관리"
+                        f"💸 [가상 분할 익절] {name}\n"
+                        f"수량: {half_qty}주 / 매도가: {current_price:,}원\n"
+                        f"수익: {pct:+.1f}% / 손익: {pnl_half:+,}원\n"
+                        f"잔여 {qty - half_qty}주 트레일링 관리\n"
+                        f"⚠️ 모의투자"
                         + CMD_FOOTER,
+                    )
+                    try:
+                        from trading.trade_journal import record_trade
+                        record_trade(ticker=ticker, name=name, side="sell", quantity=half_qty,
+                                     price=current_price, reason="분할익절", mock=True,
+                                     buy_price=buy_price, pnl=pnl_half)
+                    except Exception:
+                        pass
+                else:
+                    sell_res = execute_sell(ticker, name, half_qty,
+                                            current_price, rule_name="자동청산_분할익절")
+                    if sell_res.get("status") == "pending":
+                        positions[ticker]["partial_sell_qty"] = half_qty
+                        positions[ticker]["partial_sell_order_id"] = sell_res.get("order_id", "")
+                        logger.info("[분할 익절] %s %d주 매도 접수 (수익 %.1f%%)", name, half_qty, pct)
+                        notifier.send_to_users(
+                            [get_admin_id()],
+                            f"📊 [분할 익절] {name}\n"
+                            f"수량: {half_qty}주 / 수익: {pct:+.1f}%\n"
+                            f"잔여 {qty - half_qty}주 트레일링 관리"
+                            + CMD_FOOTER,
                     )
 
         # RSI + ATR 조회
@@ -383,24 +405,56 @@ def check_auto_positions() -> None:
         else:
             sell_qty = qty
         pnl = (current_price - buy_price) * sell_qty
-        sell_res = execute_sell(ticker, name, sell_qty, current_price,
-                                rule_name=f"자동청산_{reason[:10]}")
-        if sell_res.get("status") == "pending":
-            positions[ticker]["selling"] = True
-            positions[ticker]["sell_order_id"] = sell_res.get("order_id", "")
-            changed = True
-            logger.info(
-                "[자동청산] %s %s → 매도 접수 (pnl=%+d)",
-                name, reason, pnl,
-            )
+
+        if OPERATION_MODE == "MOCK":
+            # MOCK: 가상 청산
             pnl_str = f"+{pnl:,}" if pnl >= 0 else f"{pnl:,}"
+            emoji = "📈" if pnl >= 0 else "📉"
+            logger.info("[가상 청산] %s %s %d주 @%s (손익 %s)", name, reason, sell_qty, f"{current_price:,}", pnl_str)
             notifier.send_to_users(
                 [get_admin_id()],
-                f"🔔 [자동청산] {name}\n"
+                f"💸 [가상 매도 체결] {name}\n"
+                f"수량: {sell_qty}주 / 매도가: {current_price:,}원\n"
+                f"매수가: {buy_price:,}원\n"
+                f"{emoji} 손익: {pnl_str}원\n"
                 f"사유: {reason}\n"
-                f"예상 손익: {pnl_str}원"
+                f"⚠️ 모의투자"
                 + CMD_FOOTER,
             )
+            if pnl < 0:
+                from alerts.market_guard import record_loss_and_stoploss
+                record_loss_and_stoploss(abs(pnl))
+            else:
+                from alerts.market_guard import reset_consec_stoploss
+                reset_consec_stoploss()
+            try:
+                from trading.trade_journal import record_trade
+                record_trade(ticker=ticker, name=name, side="sell", quantity=sell_qty,
+                             price=current_price, reason=reason, mock=True,
+                             buy_price=buy_price, buy_time=pos.get("buy_time", ""), pnl=pnl)
+            except Exception:
+                pass
+            del positions[ticker]
+            changed = True
+        else:
+            sell_res = execute_sell(ticker, name, sell_qty, current_price,
+                                    rule_name=f"자동청산_{reason[:10]}")
+            if sell_res.get("status") == "pending":
+                positions[ticker]["selling"] = True
+                positions[ticker]["sell_order_id"] = sell_res.get("order_id", "")
+                changed = True
+                logger.info(
+                    "[자동청산] %s %s → 매도 접수 (pnl=%+d)",
+                    name, reason, pnl,
+                )
+                pnl_str = f"+{pnl:,}" if pnl >= 0 else f"{pnl:,}"
+                notifier.send_to_users(
+                    [get_admin_id()],
+                    f"🔔 [자동청산] {name}\n"
+                    f"사유: {reason}\n"
+                    f"예상 손익: {pnl_str}원"
+                    + CMD_FOOTER,
+                )
 
     if changed:
         save_auto_positions(positions)
