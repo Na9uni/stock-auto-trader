@@ -539,7 +539,13 @@ def check_eod_liquidation() -> None:
     - AUTO 전략의 상승장(데이트레이딩) 포지션만 대상
     - 추세추종(하락장) 포지션은 제외 (며칠 보유 가능)
     - manual 포지션 제외
+    - EOD_LIQUIDATION=false면 스킵 (스윙 모드)
     """
+    # EOD 청산 비활성화 (.env EOD_LIQUIDATION=false → 스윙 모드)
+    if not _TRADING_CONFIG.eod_liquidation:
+        logger.info("[장마감 청산] EOD_LIQUIDATION=false → 스킵 (스윙 모드)")
+        return
+
     from alerts.file_io import save_auto_positions
     from alerts.trade_executor import OPERATION_MODE
 

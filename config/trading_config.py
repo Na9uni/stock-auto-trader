@@ -54,6 +54,7 @@ class TradingConfig:
     # 시간 제한
     buy_start_minute: int = 10         # 장 시작 후 N분 뒤부터 매수 허용
     buy_end_hour: int = 15             # 이 시간 이후 신규 매수 차단 (_auto_trade 공통)
+    eod_liquidation: bool = True       # 15:20 당일 강제 청산 (False=스윙 모드)
 
     # 레짐 엔진 파라미터
     regime_defense_trigger_pct: float = -2.0     # DEFENSE 전환 KOSPI 등락률 (%)
@@ -86,6 +87,7 @@ class TradingConfig:
             strategy=os.getenv("STRATEGY", "auto").lower(),
             buy_start_minute=int(os.getenv("BUY_START_MINUTE", "10")),
             buy_end_hour=int(os.getenv("BUY_END_HOUR", "15")),
+            eod_liquidation=os.getenv("EOD_LIQUIDATION", "true").lower() == "true",
             regime_defense_trigger_pct=float(os.getenv("REGIME_DEFENSE_TRIGGER_PCT", "-2.0")),
             regime_cash_trigger_pct=float(os.getenv("REGIME_CASH_TRIGGER_PCT", "-3.0")),
             regime_swing_volatility_pct=float(os.getenv("REGIME_SWING_VOLATILITY_PCT", "3.0")),
