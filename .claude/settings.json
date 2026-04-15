@@ -72,6 +72,17 @@
         ]
       }
     ],
+    "PostCommit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'echo \"[POST-COMMIT REVIEW] 커밋 완료. 필수 수행 사항:\\n1. py_compile 전체 통과 확인\\n2. pytest tests/ -q 전체 통과 확인\\n3. 매매 로직 변경 시 expert-solo 또는 expert-meeting 리뷰 실행\\n4. 도메인 리뷰(trading-review) 수행\" >&2'",
+            "description": "커밋 후 리뷰 프로토콜 강제 알림"
+          }
+        ]
+      }
+    ],
     "PreCommit": [
       {
         "hooks": [
