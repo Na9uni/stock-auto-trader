@@ -253,9 +253,13 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
                 "buy_price": price,
                 "buy_amount": price * first_qty,
                 "buy_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "bought_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                "high_price": price,
+                "trailing_activated": False,
+                "rule_name": f"자동매매_{signal.strength.name}" if hasattr(signal, 'strength') else "자동매매",
                 "mock": True,
-                "split_remaining": remaining_qty,  # 2차 매수 대기
-                "split_price": price,  # 1차 매수가 기록
+                "split_remaining": remaining_qty,
+                "split_price": price,
                 "strategy": _strategy_tag,
             }
             save_auto_positions(positions)

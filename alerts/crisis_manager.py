@@ -211,28 +211,53 @@ def _check_crisis_meanrev(data: dict) -> None:
                 sell_reason = f"시간청산({hours_held:.0f}h)"
 
             if sell_reason:
-                # rule_name: "자동청산_" prefix → check_order_status에서 정상 처리
-                result = execute_sell(ticker, name, qty, current_price,
-                                      rule_name=f"자동청산_위기MR")
-                if result.get("status") == "pending":
-                    # auto_positions에 selling 플래그 세팅 (중복 매도 방지)
+                pnl = (current_price - buy_price) * qty
+
+                if _trade_exec.OPERATION_MODE == "MOCK":
+                    # MOCK: 가상 청산 (order_queue 우회)
                     positions = load_auto_positions()
                     if ticker in positions:
-                        positions[ticker]["selling"] = True
-                        positions[ticker]["sell_order_id"] = result.get("order_id", "")
+                        del positions[ticker]
                         save_auto_positions(positions)
-
-                    pnl = (current_price - buy_price) * qty
+                    pnl_str = f"+{pnl:,}" if pnl >= 0 else f"{pnl:,}"
                     notifier.send_to_users(
                         [get_admin_id()],
-                        f"[위기MR 매도] {name}\n"
+                        f"💸 [가상 위기MR 매도] {name}\n"
                         f"사유: {sell_reason}\n"
-                        f"예상 손익: {pnl:+,}원" + CMD_FOOTER,
+                        f"손익: {pnl_str}원\n"
+                        f"⚠️ 모의투자" + CMD_FOOTER,
                     )
-                    logger.info("[위기MR] %s 매도: %s, 예상pnl=%+d", name, sell_reason, pnl)
-                    # PnL/손절 카운터는 check_order_status()에서 체결 확인 후 기록
-                    # 여기서 기록하면 이중 계상됨
-                    _crisis_mr_position = None
+                    if pnl < 0:
+                        record_loss_and_stoploss(abs(pnl))
+                    else:
+                        reset_consec_stoploss()
+                    try:
+                        from trading.trade_journal import record_trade
+                        record_trade(ticker=ticker, name=name, side="sell", quantity=qty,
+                                     price=current_price, reason=f"위기MR_{sell_reason}", mock=True,
+                                     buy_price=buy_price, pnl=pnl)
+                    except Exception:
+                        pass
+                    logger.info("[위기MR] %s MOCK 매도: %s, pnl=%+d", name, sell_reason, pnl)
+                else:
+                    # LIVE: order_queue 경유
+                    result = execute_sell(ticker, name, qty, current_price,
+                                          rule_name="자동청산_위기MR")
+                    if result.get("status") == "pending":
+                        positions = load_auto_positions()
+                        if ticker in positions:
+                            positions[ticker]["selling"] = True
+                            positions[ticker]["sell_order_id"] = result.get("order_id", "")
+                            save_auto_positions(positions)
+                        notifier.send_to_users(
+                            [get_admin_id()],
+                            f"[위기MR 매도] {name}\n"
+                            f"사유: {sell_reason}\n"
+                            f"예상 손익: {pnl:+,}원" + CMD_FOOTER,
+                        )
+                        logger.info("[위기MR] %s 매도: %s, 예상pnl=%+d", name, sell_reason, pnl)
+
+                _crisis_mr_position = None
             continue
 
         # ── 미보유: 매수 판단 ──
