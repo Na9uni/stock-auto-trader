@@ -16,6 +16,8 @@ from alerts.market_guard import (
     is_daily_loss_exceeded,
     is_monthly_loss_exceeded,
     is_consec_stoploss_exceeded,
+    record_loss_and_stoploss,
+    reset_consec_stoploss,
 )
 from alerts.notifications import get_admin_id, CMD_FOOTER
 from alerts.telegram_notifier import TelegramNotifier
