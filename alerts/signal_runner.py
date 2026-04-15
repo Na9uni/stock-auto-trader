@@ -254,6 +254,13 @@ def check_signals() -> None:
         except (ValueError, TypeError):
             pass
 
+    # ── EOD vs 보유 비교: 어제 청산 기록에 오늘 시가 채움 ──
+    try:
+        from trading.eod_tracker import fill_next_day_prices
+        fill_next_day_prices(data)
+    except Exception:
+        pass
+
     # ── 4-Mode 레짐 감지 ──
     from strategies.regime_engine import get_regime_engine, RegimeState
     from alerts.market_guard import fetch_index_prices
@@ -595,6 +602,12 @@ def check_eod_liquidation() -> None:
                 buy_time=pos.get("buy_time", ""),
                 pnl=pnl,
             )
+            # EOD vs 보유 비교 기록
+            try:
+                from trading.eod_tracker import record_eod_sell
+                record_eod_sell(ticker, name, qty, cp, bp, pnl)
+            except Exception:
+                pass
             # 손실 기록
             if pnl < 0:
                 record_loss_and_stoploss(abs(pnl))
