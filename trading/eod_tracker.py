@@ -111,10 +111,46 @@ def fill_next_day_prices(kiwoom_data: dict) -> None:
             rec["hold_pnl"] = hold_pnl
             rec["better_choice"] = "eod" if rec["eod_pnl"] >= hold_pnl else "hold"
             changed = True
+
+            eod_pnl = rec["eod_pnl"]
+            diff = hold_pnl - eod_pnl
+            winner = "데이트레이딩" if rec["better_choice"] == "eod" else "스윙"
+
             logger.info(
-                "[EOD비교] %s 결과: EOD %+d원 vs 보유 %+d원 → %s 승",
-                rec["name"], rec["eod_pnl"], hold_pnl, rec["better_choice"],
+                "[EOD비교] %s 결과: 데이트레이딩 %+d원 vs 스윙 %+d원 → %s 승 (차이 %+d원)",
+                rec["name"], eod_pnl, hold_pnl, winner, diff,
             )
+
+            # 매매 일지에 비교 기록 추가
+            try:
+                from trading.trade_journal import record_trade
+                record_trade(
+                    ticker=ticker, name=rec["name"], side="comparison",
+                    quantity=qty, price=open_price,
+                    reason=f"[EOD비교] 데이트레이딩 {eod_pnl:+,}원 vs 스윙 {hold_pnl:+,}원 → {winner} 승 (차이 {diff:+,}원)",
+                    mock=True, buy_price=buy_price, pnl=diff,
+                )
+            except Exception:
+                pass
+
+            # 텔레그램 알림
+            try:
+                from alerts.telegram_notifier import TelegramNotifier
+                from alerts.notifications import get_admin_id, CMD_FOOTER
+                emoji = "📊" if rec["better_choice"] == "eod" else "💡"
+                TelegramNotifier().send_to_users(
+                    [get_admin_id()],
+                    f"{emoji} [EOD vs 스윙 비교] {rec['name']}\n"
+                    f"어제 청산가: {rec['sell_price']:,}원\n"
+                    f"오늘 시가: {open_price:,}원\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"데이트레이딩: {eod_pnl:+,}원\n"
+                    f"스윙(보유): {hold_pnl:+,}원\n"
+                    f"→ {winner} 승! (차이 {diff:+,}원)"
+                    + CMD_FOOTER,
+                )
+            except Exception:
+                pass
 
         if close_price > 0:
             rec["next_day_close"] = close_price
