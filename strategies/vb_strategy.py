@@ -122,7 +122,7 @@ class VBStrategy:
                 strength=SignalStrength.STRONG,
                 score=10.0,
                 reasons=[
-                    f"돌파! 현재가 {ctx.current_price:,} >= 목표가 {target_price:,}{_time_note}",
+                    f"돌파! 현재가 {ctx.current_price:,} >= 목표가 {target_price:,}",
                     f"시가{today_open:,} + range{prev_range:,}×{k}",
                     f"MA10={ma10:,.0f}",
                 ],
