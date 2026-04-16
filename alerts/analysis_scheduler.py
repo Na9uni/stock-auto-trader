@@ -192,6 +192,13 @@ def run_scheduler() -> None:
     )
     logger.info("=" * 50)
 
+    # 시작 자가 진단
+    try:
+        from alerts.self_diagnostic import run_and_report
+        run_and_report()
+    except Exception as e:
+        logger.error("[자가진단] 실행 실패: %s", e)
+
     # 시작 알림 (텔레그램)
     try:
         positions = load_auto_positions()
