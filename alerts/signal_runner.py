@@ -178,9 +178,14 @@ def _process_signal(
                         else ("dead" if _ph > 0 and _h <= 0 else None)
                     )
 
-        # 체결강도/거래량 0이면 AI에 보내지 않음 (잘못된 판단 방지)
-        _exec = float(info.get("exec_strength", 0))
-        _clean_vol = _sig_vol if not pd.isna(_sig_vol) and _sig_vol > 0 else None
+        # vol_ratio가 nan이면 kiwoom_data에서 직접 계산
+        import math
+        if math.isnan(_sig_vol) if isinstance(_sig_vol, float) else True:
+            _cur_vol = int(info.get("volume", 0))
+            _prev_vol = int(info.get("prev_volume", 0))
+            if _prev_vol > 0:
+                _sig_vol = _cur_vol / _prev_vol
+        _exec = float(info.get("exec_strength", 0.0))
 
         ai_result = ai.quick_signal_alert(
             ticker=ticker, name=name,
@@ -188,7 +193,8 @@ def _process_signal(
             change_rate=info.get("change_rate", 0),
             signal_reasons=signal.reasons,
             rsi=_sig_rsi, macd_cross=_sig_macd,
-            vol_ratio=_clean_vol if _clean_vol else float("nan"),
+            vol_ratio=_sig_vol,
+            exec_strength=_exec,
         )
         ai_decision = ai_result.get("decision", "")
         ai_text = ai_result.get("text", "")

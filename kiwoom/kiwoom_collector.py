@@ -864,6 +864,12 @@ class KiwoomCollector:
             updated["candles_1m"] = candles_1m
         if candles_1d is not None:
             updated["candles_1d"] = candles_1d
+        # prev_volume 보정: basic/일봉 수집 시점이 달라도 보정되도록
+        _cd = candles_1d if candles_1d is not None else updated.get("candles_1d", [])
+        if updated.get("prev_volume", 0) == 0 and _cd and len(_cd) >= 2:
+            _fixed_pv = _cd[1].get("volume", 0)
+            updated["prev_volume"] = _fixed_pv
+            logger.info("[보정] %s prev_volume: 0 → %s (일봉 기준)", name, f"{_fixed_pv:,}")
         self._data["stocks"][ticker] = updated
 
     def _update_account_data(self, account: dict[str, Any]) -> None:
@@ -1158,15 +1164,15 @@ def main() -> None:
             collector.collect_primary()
 
             # 2. Interest stocks (every INTEREST_EVERY_N_TICKS)
-            if tick_count % INTEREST_EVERY_N_TICKS == 0:
+            if tick_count == 1 or tick_count % INTEREST_EVERY_N_TICKS == 0:
                 collector.collect_interest()
 
             # 3. Account balance (every ACCOUNT_EVERY_N_TICKS)
-            if tick_count % ACCOUNT_EVERY_N_TICKS == 0:
+            if tick_count == 1 or tick_count % ACCOUNT_EVERY_N_TICKS == 0:
                 collector.collect_account_balance()
 
             # 4. Daily candles (every DAILY_EVERY_N_TICKS)
-            if tick_count % DAILY_EVERY_N_TICKS == 0:
+            if tick_count == 1 or tick_count % DAILY_EVERY_N_TICKS == 0:
                 collector.collect_daily_candles()
 
             # 5. Process order queue

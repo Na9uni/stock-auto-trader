@@ -61,6 +61,28 @@ class AIAnalyzer:
         if not self.api_key:
             return {"decision": "관망", "text": "API 키 미설정"}
 
+        import math as _math
+        # 데이터를 사람 말로 번역
+        if _math.isnan(vol_ratio) if isinstance(vol_ratio, float) else True:
+            vol_desc = "거래량 정보 없음"
+        elif vol_ratio < 0.5:
+            vol_desc = "평소보다 거래 적음"
+        elif vol_ratio < 1.5:
+            vol_desc = "평소 수준"
+        elif vol_ratio < 3.0:
+            vol_desc = "평소보다 거래 많음"
+        else:
+            vol_desc = "거래 폭발적"
+
+        if exec_strength == 0:
+            exec_desc = "매수세 데이터 없음"
+        elif exec_strength < 80:
+            exec_desc = "파는 사람이 더 많음"
+        elif exec_strength < 120:
+            exec_desc = "사고파는 힘이 비슷함"
+        else:
+            exec_desc = "사려는 사람이 더 많음"
+
         candle_info = ""
         if recent_candles:
             candle_info = f"\n최근 캔들: {json.dumps(recent_candles, ensure_ascii=False)}"
@@ -70,6 +92,7 @@ class AIAnalyzer:
             orderbook_info = f"\n호가창: {json.dumps(orderbook, ensure_ascii=False)}"
 
         prompt = f"""당신은 한국 주식 단타 자동매매 AI입니다.
+초등학생도 이해할 수 있게 쉬운 한국어로 답변하세요. 전문 용어를 쓰지 마세요.
 이 신호는 이미 RSI, MACD, 볼린저밴드, 이동평균, 거래량 등 10개 기술적 조건에서 STRONG(6점 이상) 판정을 받았습니다.
 기술적 분석은 이미 완료되었으므로, 당신은 치명적 리스크가 있는 경우에만 [관망]을 판단하세요.
 
@@ -77,8 +100,8 @@ class AIAnalyzer:
 현재가: {price:,}원 ({change_rate:+.1f}%)
 RSI: {rsi:.1f}
 MACD: {macd_cross or '없음'}
-거래량 배수: {vol_ratio:.1f}x
-체결강도: {exec_strength:.1f}
+거래량: {vol_desc}
+매수세: {exec_desc}
 매수 신호 사유: {', '.join(signal_reasons)}
 경고: {', '.join(warnings or [])}{candle_info}{orderbook_info}
 
