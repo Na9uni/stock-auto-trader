@@ -150,10 +150,12 @@ def _process_signal(
         logger.debug("[신호] %s 쿨다운 중 → 스킵", name)
         return
 
-    # AI 분석 (매수 신호만)
+    # AI 분석 (매수 신호만 + 데이터 완전할 때만)
     ai_decision = ""
     ai_text = ""
-    if signal.signal_type == SignalType.BUY:
+    _exec_str = float(info.get("exec_strength", 0))
+    _has_complete_data = _exec_str > 0  # 체결강도 0이면 데이터 불완전 → AI 스킵
+    if signal.signal_type == SignalType.BUY and _has_complete_data:
         # 5분봉 지표에서 RSI/MACD/거래량 추출 (VB 등 일봉 전략은 자체 값 없으므로)
         _sig_rsi = signal.rsi
         _sig_macd = signal.macd_cross
@@ -191,8 +193,12 @@ def _process_signal(
         ai_decision = ai_result.get("decision", "")
         ai_text = ai_result.get("text", "")
 
+    # 데이터 불완전 시 AI 스킵 메시지
+    if signal.signal_type == SignalType.BUY and not _has_complete_data:
+        ai_block = ""  # AI 의견 없이 깔끔하게
+
     # AI 분석 텍스트를 쉬운 말로 변환
-    if ai_text:
+    elif ai_text:
         # 체결강도/거래량 데이터 문제로 "관망"이면 → AI 의견 생략
         _data_issue = any(kw in ai_text for kw in ["체결강도 0", "거래량 배수 nan", "거래 부재", "데이터 부재"])
         if _data_issue and "[관망]" in ai_text:
