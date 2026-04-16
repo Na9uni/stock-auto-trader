@@ -211,18 +211,15 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
         logger.debug("[자동매매] %s 매수 진행: qty=%d, price=%s, mode=%s", name, quantity, f"{price:,}", OPERATION_MODE)
 
         if OPERATION_MODE == "MOCK":
-            # 분할 매수: 1차 60% 즉시, 2차 40% 보류
-            first_qty = max(1, int(quantity * 0.6))
-            remaining_qty = quantity - first_qty
-
+            # 100% 즉시 매수 (분할 매수 비활성 — 자본 효율 극대화)
             logger.info(
-                "[가상매매] %s 1차 매수 체결 %d주 @%s (분할 1/2, 금액 %s)",
-                name, first_qty, f"{price:,}", f"{price * first_qty:,}",
+                "[가상매매] %s 매수 체결 %d주 @%s (금액 %s)",
+                name, quantity, f"{price:,}", f"{amount:,}",
             )
             from trading.trade_journal import record_trade
             record_trade(
                 ticker=ticker, name=name, side="buy",
-                quantity=first_qty, price=price,
+                quantity=quantity, price=price,
                 reason=", ".join(signal.reasons[:2]),
                 strategy=signal.strategy_name if hasattr(signal, "strategy_name") else "",
                 mock=True,
@@ -231,11 +228,10 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
             )
             notifier.send_to_users(
                 [get_admin_id()],
-                f"🛒 [가상 매수 1차] {name} ({ticker})\n"
-                f"💰 수량: {first_qty}주 / 가격: {price:,}원 (60%)\n"
-                f"💵 투자금액: {price * first_qty:,}원\n"
+                f"🛒 [가상 매수 체결] {name} ({ticker})\n"
+                f"💰 수량: {quantity}주 / 가격: {price:,}원\n"
+                f"💵 투자금액: {amount:,}원\n"
                 f"📊 사유: {', '.join(signal.reasons[:3])}\n"
-                f"⏳ 2차 매수({remaining_qty}주) 다음 체크에서 확인\n"
                 f"⚠️ 모의투자"
                 + CMD_FOOTER,
             )
@@ -249,17 +245,15 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
             positions = load_auto_positions()
             positions[ticker] = {
                 "name": name,
-                "qty": first_qty,
+                "qty": quantity,
                 "buy_price": price,
-                "buy_amount": price * first_qty,
+                "buy_amount": amount,
                 "buy_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "bought_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
                 "high_price": price,
                 "trailing_activated": False,
                 "rule_name": f"자동매매_{signal.strength.name}" if hasattr(signal, 'strength') else "자동매매",
                 "mock": True,
-                "split_remaining": remaining_qty,
-                "split_price": price,
                 "strategy": _strategy_tag,
             }
             save_auto_positions(positions)
