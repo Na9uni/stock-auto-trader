@@ -176,36 +176,40 @@ def _process_signal(
                         else ("dead" if _ph > 0 and _h <= 0 else None)
                     )
 
+        # 체결강도/거래량 0이면 AI에 보내지 않음 (잘못된 판단 방지)
+        _exec = float(info.get("exec_strength", 0))
+        _clean_vol = _sig_vol if not pd.isna(_sig_vol) and _sig_vol > 0 else None
+
         ai_result = ai.quick_signal_alert(
             ticker=ticker, name=name,
             price=int(info.get("current_price", 0)),
             change_rate=info.get("change_rate", 0),
             signal_reasons=signal.reasons,
             rsi=_sig_rsi, macd_cross=_sig_macd,
-            vol_ratio=_sig_vol,
+            vol_ratio=_clean_vol if _clean_vol else float("nan"),
         )
         ai_decision = ai_result.get("decision", "")
         ai_text = ai_result.get("text", "")
 
     # AI 분석 텍스트를 쉬운 말로 변환
     if ai_text:
-        simple_ai = ai_text
-        # 전문 용어 → 쉬운 말
-        simple_ai = simple_ai.replace("체결강도 0.0", "거래 데이터 아직 없음")
-        simple_ai = simple_ai.replace("거래량 배수 nan", "거래량 정보 없음")
-        simple_ai = simple_ai.replace("실질적 거래 부재", "아직 거래가 활발하지 않음")
-        simple_ai = simple_ai.replace("치명적 리스크", "주의 필요")
-        simple_ai = simple_ai.replace("유동성 리스크", "거래 부족 위험")
-        simple_ai = simple_ai.replace("슬리피지", "가격 차이")
-        simple_ai = simple_ai.replace("신뢰성을 담보", "믿을 수 있는지 확인")
-        # 판단 → 이모지
-        if "[매수]" in simple_ai or "매수" == ai_decision:
-            simple_ai = "✅ 사도 좋겠어요!\n" + simple_ai
-        elif "[관망]" in simple_ai:
-            simple_ai = "⏸️ 지켜보세요 (참고만)\n" + simple_ai.replace("**[관망]**", "").replace("[관망]", "").strip()
-        elif "[매도]" in simple_ai:
-            simple_ai = "🚨 사지 마세요!\n" + simple_ai
-        ai_block = f"\n💬 AI 의견: {simple_ai}\n"
+        # 체결강도/거래량 데이터 문제로 "관망"이면 → AI 의견 생략
+        _data_issue = any(kw in ai_text for kw in ["체결강도 0", "거래량 배수 nan", "거래 부재", "데이터 부재"])
+        if _data_issue and "[관망]" in ai_text:
+            ai_block = "\n💬 AI 의견: ℹ️ 데이터 수집 중 (정상, 무시하세요)\n"
+        else:
+            simple_ai = ai_text
+            simple_ai = simple_ai.replace("치명적 리스크", "주의 필요")
+            simple_ai = simple_ai.replace("유동성 리스크", "거래 부족 위험")
+            simple_ai = simple_ai.replace("슬리피지", "가격 차이")
+            if "[매수]" in simple_ai or "매수" == ai_decision:
+                ai_block = f"\n💬 AI 의견: ✅ 사도 좋겠어요!\n"
+            elif "[관망]" in simple_ai:
+                ai_block = f"\n💬 AI 의견: ⏸️ 지켜보세요 (참고만)\n"
+            elif "[매도]" in simple_ai:
+                ai_block = f"\n💬 AI 의견: 🚨 사지 마세요!\n"
+            else:
+                ai_block = f"\n💬 AI 의견: {simple_ai}\n"
     else:
         ai_block = ""
 
