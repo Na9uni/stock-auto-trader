@@ -37,6 +37,26 @@
             "description": "손실 방어 핵심 파일 + .env 수정 사전 차단"
           }
         ]
+      },
+      {
+        "matcher": "Bash(git commit*)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'python -c \"from strategies.combo_strategy import ComboStrategy; from strategies.auto_strategy import AutoStrategy; from config.trading_config import TradingConfig; from alerts.analysis_scheduler import run_scheduler\" 2>&1 || exit 2'",
+            "description": "핵심 모듈 임포트 검증"
+          },
+          {
+            "type": "command",
+            "command": "bash -c 'if git diff --cached --name-only | grep -q \".env\"; then echo \"[BLOCK] .env 커밋 차단\" >&2; exit 2; fi'",
+            "description": ".env 커밋 차단"
+          },
+          {
+            "type": "command",
+            "command": "bash -c 'if git diff --cached --name-only | grep -qE \"strategies/|alerts/signal\"; then python -m pytest tests/ -q --tb=short 2>&1 || exit 2; fi'",
+            "description": "전략/신호 파일 커밋 전 전체 테스트"
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -59,21 +79,9 @@
             "description": "_state.py 영향 범위 경고"
           }
         ]
-      }
-    ],
-    "Stop": [
+      },
       {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash -c 'CHANGED=$(git diff --name-only HEAD 2>/dev/null); if echo \"$CHANGED\" | grep -qE \"strategies/|alerts/signal\"; then echo \"[STOP CHECK] 전략/신호 파일 변경 감지. 완료 전 확인:\\n1. Auto Review Protocol 결과 보고 완료?\\n2. 백테스트 실행 또는 계획 안내?\\n3. 도메인 리뷰(trading-review 스킬 기준) 수행?\\n미완료 시 먼저 수행.\" >&2; fi'",
-            "description": "전략 변경 후 리뷰 완료 체크포인트"
-          }
-        ]
-      }
-    ],
-    "PostCommit": [
-      {
+        "matcher": "Bash(git commit*)",
         "hooks": [
           {
             "type": "command",
@@ -83,23 +91,23 @@
         ]
       }
     ],
-    "PreCommit": [
+    "Stop": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'python -c \"from strategies.combo_strategy import ComboStrategy; from strategies.auto_strategy import AutoStrategy; from config.trading_config import TradingConfig; from alerts.analysis_scheduler import run_scheduler\" 2>&1 || exit 2'",
-            "description": "핵심 모듈 임포트 검증"
+            "command": "bash -c 'CHANGED=$(git diff --name-only HEAD 2>/dev/null); if echo \"$CHANGED\" | grep -qE \"strategies/|alerts/signal\"; then echo \"[STOP CHECK] 전략/신호 파일 변경 감지. 완료 전 확인:\\n1. Auto Review Protocol 결과 보고 완료?\\n2. 백테스트 실행 또는 계획 안내?\\n3. 도메인 리뷰(trading-review 스킬 기준) 수행?\\n미완료 시 먼저 수행.\" >&2; fi'",
+            "description": "전략 변경 후 리뷰 완료 체크포인트"
           },
           {
             "type": "command",
-            "command": "bash -c 'if git diff --cached --name-only | grep -q \".env\"; then echo \"[BLOCK] .env 커밋 차단\" >&2; exit 2; fi'",
-            "description": ".env 커밋 차단"
+            "command": "bash -c 'CHANGED=$(git diff --name-only HEAD 2>/dev/null); if echo \"$CHANGED\" | grep -qE \"kiwoom/|alerts/|strategies/|config/trading_config|ai/ai_analyzer\"; then python -c \"import json; d=json.load(open(\\\"data/kiwoom_data.json\\\",encoding=\\\"utf-8\\\")); stocks=d.get(\\\"stocks\\\",{}); zero_pv=sum(1 for s in stocks.values() if s.get(\\\"prev_volume\\\",0)==0); zero_1d=sum(1 for s in stocks.values() if len(s.get(\\\"candles_1d\\\",[]))<2); total=len(stocks); assert total>0, \\\"kiwoom_data.json 비어있음\\\"; pct_pv=zero_pv*100//total; pct_1d=zero_1d*100//total; threshold_pv = 80 if total > 50 else 50; threshold_1d = 80 if total > 50 else 50; print(f\\\"[데이터 무결성] 전체 {total}종목: prev_volume=0 {zero_pv}개({pct_pv}%), candles_1d부족 {zero_1d}개({pct_1d}%) | 차단기준 prev_volume>{threshold_pv}% 또는 1d>{threshold_1d}%\\\"); exit(2 if pct_pv > threshold_pv or pct_1d > threshold_1d else 0)\" 2>&1 >&2 || exit 2; fi'",
+            "description": "수집기/신호/전략 수정 시 실제 데이터 무결성 검증 (차단). 100+ 종목 환경에선 로테이션 진행 중 임계값 완화"
           },
           {
             "type": "command",
-            "command": "bash -c 'if git diff --cached --name-only | grep -qE \"strategies/|alerts/signal\"; then python -m pytest tests/ -q --tb=short 2>&1 || exit 2; fi'",
-            "description": "전략/신호 파일 커밋 전 전체 테스트"
+            "command": "bash -c 'CHANGED=$(git diff --name-only HEAD 2>/dev/null); if echo \"$CHANGED\" | grep -qE \"trade_executor|signal_runner|kiwoom_collector\"; then echo \"[런타임 검증 필수] 아래 중 하나 이상 제시했는지 확인:\\n- 실제 로그(logs/*)에서 수정한 로직 실행 흔적\\n- data/kiwoom_data.json 필드 직접 검증\\n- 프로그램 재시작 후 텔레그램/로그 확인\\n정적 검사(py_compile/pytest)만으로 완료 선언 금지.\" >&2; fi'",
+            "description": "실행 경로 파일 수정 시 런타임 증거 제시 강제 알림"
           }
         ]
       }

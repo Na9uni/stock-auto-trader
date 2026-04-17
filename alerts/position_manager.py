@@ -208,9 +208,22 @@ def check_auto_positions() -> None:
                 if OPERATION_MODE == "MOCK":
                     pos["qty"] = int(pos.get("qty", 0)) + split_remaining
                     pos["buy_price"] = int((pos["buy_price"] * (pos["qty"] - split_remaining) + current_price * split_remaining) / pos["qty"])
+                    pos["buy_amount"] = pos["buy_price"] * pos["qty"]
                     pos.pop("split_remaining", None)
                     pos.pop("split_price", None)
                     logger.info("[분할매수 2차] %s +%d주 @%s → 총 %d주", name, split_remaining, f"{current_price:,}", pos["qty"])
+                    # 매매일지 기록 (2차 매수분)
+                    try:
+                        from trading.trade_journal import record_trade
+                        record_trade(
+                            ticker=ticker, name=name, side="buy",
+                            quantity=split_remaining, price=current_price,
+                            reason="분할매수 2차 (40%)",
+                            strategy=pos.get("strategy", ""),
+                            mock=True,
+                        )
+                    except Exception as e:
+                        logger.warning("[분할매수 2차] 매매일지 기록 실패: %s", e)
                     try:
                         notifier.send_to_users(
                             [get_admin_id()],
@@ -423,10 +436,10 @@ def check_auto_positions() -> None:
             )
             if pnl < 0:
                 from alerts.market_guard import record_loss_and_stoploss
-                record_loss_and_stoploss(abs(pnl))
+                record_loss_and_stoploss(abs(pnl), mock=True)
             else:
                 from alerts.market_guard import reset_consec_stoploss
-                reset_consec_stoploss()
+                reset_consec_stoploss(mock=True)
             try:
                 from trading.trade_journal import record_trade
                 record_trade(ticker=ticker, name=name, side="sell", quantity=sell_qty,

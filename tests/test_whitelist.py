@@ -8,6 +8,7 @@ from config.whitelist import (
     is_etf,
     get_ticker_k,
     AUTO_TRADE_WHITELIST,
+    BACKTEST_VERIFIED,
     ETF_WHITELIST,
     STOCK_WHITELIST,
     TICKER_K_MAP,
@@ -20,9 +21,10 @@ class TestWhitelist:
     def test_samsung_is_whitelisted(self) -> None:
         assert is_whitelisted("005930")
 
-    def test_removed_ticker_not_whitelisted(self) -> None:
-        """제거된 종목(보성파워텍 006910)은 화이트리스트에 없어야 한다."""
-        assert not is_whitelisted("006910")
+    def test_backtest_verified_subset(self) -> None:
+        """BACKTEST_VERIFIED의 모든 종목은 AUTO_TRADE_WHITELIST에 포함되어야 한다."""
+        for ticker in BACKTEST_VERIFIED:
+            assert is_whitelisted(ticker), f"{ticker}가 화이트리스트에 없음"
 
     def test_samsung_is_not_etf(self) -> None:
         assert not is_etf("005930")
@@ -31,20 +33,24 @@ class TestWhitelist:
         """KODEX 코스닥150 (229200)은 ETF여야 한다."""
         assert is_etf("229200")
 
-    def test_kodex200_removed_from_whitelist(self) -> None:
-        """KODEX 200 (069500)은 화이트리스트에서 제거됨."""
-        assert not is_whitelisted("069500")
+    def test_kodex200_in_whitelist(self) -> None:
+        """KODEX 200 (069500)은 2026-04-17 확장판에서 재포함됨 (MOCK 테스트 범위 확대)."""
+        assert is_whitelisted("069500")
 
     def test_per_ticker_k(self) -> None:
         assert get_ticker_k("131890") == 0.3   # ACE 삼성그룹동일가중
         assert get_ticker_k("132030") == 0.7   # 골드선물
         assert get_ticker_k("999999") is None  # 없는 종목
 
-    def test_all_whitelist_tickers_have_k(self) -> None:
-        """모든 화이트리스트 종목에 K값이 정의되어 있어야 한다."""
-        for ticker in AUTO_TRADE_WHITELIST:
+    def test_backtest_verified_tickers_have_k(self) -> None:
+        """백테스트 검증 완료 종목은 반드시 K값이 정의되어야 한다.
+
+        확장 화이트리스트의 미검증 종목은 기본 K값(VB_K / VB_K_INDIVIDUAL)을 사용하므로
+        TICKER_K_MAP에 없어도 됨. 단 BACKTEST_VERIFIED는 최적 K값 필수.
+        """
+        for ticker in BACKTEST_VERIFIED:
             k = get_ticker_k(ticker)
-            assert k is not None, f"{ticker} ({AUTO_TRADE_WHITELIST[ticker]}) has no K value in TICKER_K_MAP"
+            assert k is not None, f"{ticker} ({BACKTEST_VERIFIED[ticker]}) 백테스트 검증 종목인데 K값 없음"
 
     def test_whitelist_is_union_of_etf_and_stock(self) -> None:
         """AUTO_TRADE_WHITELIST = ETF_WHITELIST + STOCK_WHITELIST."""

@@ -64,6 +64,7 @@ def _build_market_context(
     """공통 MarketContext 생성. 데이터 부족 시 None 반환."""
     candles_1d = info.get("candles_1d", [])
     if len(candles_1d) < 12:
+        logger.warning("[신호] %s 일봉 부족 (%d개 < 12) — 전략 평가 불가", name, len(candles_1d))
         return None
 
     current_price = int(info.get("current_price", 0))
@@ -176,6 +177,15 @@ def _process_signal(
                         else ("dead" if _ph > 0 and _h <= 0 else None)
                     )
 
+        # vol_ratio가 nan이면 kiwoom_data에서 직접 계산
+        import math
+        if math.isnan(_sig_vol):
+            _cur_vol = info.get("volume", 0)
+            _prev_vol = info.get("prev_volume", 0)
+            if _prev_vol > 0:
+                _sig_vol = _cur_vol / _prev_vol
+        _exec = float(info.get("exec_strength", 0.0))
+
         ai_result = ai.quick_signal_alert(
             ticker=ticker, name=name,
             price=int(info.get("current_price", 0)),
@@ -183,6 +193,7 @@ def _process_signal(
             signal_reasons=signal.reasons,
             rsi=_sig_rsi, macd_cross=_sig_macd,
             vol_ratio=_sig_vol,
+            exec_strength=_exec,
         )
         ai_decision = ai_result.get("decision", "")
         ai_text = ai_result.get("text", "")
@@ -276,15 +287,22 @@ def check_signals() -> None:
     regime_params = engine.params
     logger.debug("[신호] 레짐: %s, 파라미터: slots=%d, buy=%s", regime.value, regime_params.max_slots, regime_params.buy_allowed)
 
-    # CASH: 전량 청산, 매매 금지
+    # CASH/DEFENSE 레짐 처리
+    from alerts.trade_executor import OPERATION_MODE as _OP_MODE
     if regime == RegimeState.CASH:
-        _execute_regime_liquidation(data, engine)
-        return
+        if _OP_MODE == "MOCK":
+            # MOCK 모드: 청산 스킵 (매 사이클 청산→매수 루프 방지). 스윙 유지 테스트 목적.
+            logger.info("[MOCK] CASH 레짐 — 청산 스킵, 가상 매매 평가 계속")
+        else:
+            _execute_regime_liquidation(data, engine)
+            return
 
-    # DEFENSE: 50% 축소, 신규 매수 금지
     if regime == RegimeState.DEFENSE:
-        _execute_defense_cuts(data, engine)
-        return
+        if _OP_MODE == "MOCK":
+            logger.info("[MOCK] DEFENSE 레짐 — 축소 스킵, 가상 매매 평가 계속")
+        else:
+            _execute_defense_cuts(data, engine)
+            return
 
     from ai.ai_analyzer import AIAnalyzer
     notifier = TelegramNotifier()
@@ -478,9 +496,9 @@ def _execute_regime_liquidation(data: dict, engine) -> None:
                 pnl=pnl,
             )
             if pnl < 0:
-                record_loss_and_stoploss(abs(pnl))
+                record_loss_and_stoploss(abs(pnl), mock=True)
             else:
-                reset_consec_stoploss()
+                reset_consec_stoploss(mock=True)
             del positions[ticker]
             liquidated.append(name)
         else:
@@ -616,9 +634,9 @@ def check_eod_liquidation() -> None:
                 pass
             # 손실 기록
             if pnl < 0:
-                record_loss_and_stoploss(abs(pnl))
+                record_loss_and_stoploss(abs(pnl), mock=True)
             else:
-                reset_consec_stoploss()
+                reset_consec_stoploss(mock=True)
             del positions[ticker]
             liquidated.append(f"{name} {pnl:+,}원")
         else:

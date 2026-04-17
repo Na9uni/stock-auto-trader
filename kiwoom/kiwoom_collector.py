@@ -45,7 +45,7 @@ INTEREST_INTERVAL_SEC = 90
 INTEREST_CANDLE_COUNT = 60
 INTEREST_EVERY_N_TICKS = 3       # 90s / 30s
 ACCOUNT_EVERY_N_TICKS = 5        # 150s / 30s = 2.5min
-DAILY_EVERY_N_TICKS = 20         # 600s / 30s = 10min
+DAILY_EVERY_N_TICKS = 5          # 150s / 30s = 2.5min (batch 30 × 4사이클 = 10분 full refresh)
 
 TR_SLEEP_SEC = 0.6
 
@@ -719,6 +719,8 @@ class KiwoomCollector:
         # Ticker lists
         self._tickers: dict[str, str] = {}           # ticker -> name (primary/watch)
         self._interest_tickers: dict[str, str] = {}   # ticker -> name (secondary)
+        self._primary_cursor: int = 0                 # 로테이션 수집 커서 (100+ 종목 대응)
+        self._daily_cursor: int = 0                   # 일봉 로테이션 커서
 
         # Collected data
         self._data: dict[str, Any] = {
@@ -864,6 +866,12 @@ class KiwoomCollector:
             updated["candles_1m"] = candles_1m
         if candles_1d is not None:
             updated["candles_1d"] = candles_1d
+        # prev_volume 보정: basic/일봉 수집 시점이 달라도 보정되도록 블록 밖에서 처리
+        _cd = candles_1d if candles_1d is not None else updated.get("candles_1d", [])
+        if updated.get("prev_volume", 0) == 0 and _cd and len(_cd) >= 2:
+            _fixed_pv = _cd[1].get("volume", 0)
+            updated["prev_volume"] = _fixed_pv
+            logger.info("[보정] %s prev_volume: 0 → %s (일봉 기준)", name, f"{_fixed_pv:,}")
         self._data["stocks"][ticker] = updated
 
     def _update_account_data(self, account: dict[str, Any]) -> None:
@@ -916,9 +924,31 @@ class KiwoomCollector:
 
     # ----- Collection rounds -----
 
-    def collect_primary(self) -> None:
-        """Collect basic info + 5min candles for primary watch list."""
-        for ticker, name in self._tickers.items():
+    def collect_primary(self, batch_size: int = 15) -> None:
+        """Collect basic info + 5min candles for primary watch list (rotating).
+
+        100+ 종목 처리를 위해 매 틱마다 batch_size개씩 로테이션.
+        TR_SLEEP_SEC=0.6이므로 15종목 × 2 TR × 0.6초 = 18초 (틱 30초 내 여유 12초).
+        전체 1사이클: 102 / 15 ≈ 7틱 = 3.5분.
+        """
+        tickers_list = list(self._tickers.items())
+        total = len(tickers_list)
+        if total == 0:
+            return
+        # 소규모(batch_size 이하)면 전체 수집
+        if total <= batch_size:
+            batch = tickers_list
+        else:
+            start = self._primary_cursor % total
+            end = start + batch_size
+            if end <= total:
+                batch = tickers_list[start:end]
+            else:
+                # 리스트 끝 넘으면 앞으로 감음
+                batch = tickers_list[start:] + tickers_list[: end - total]
+            self._primary_cursor = end % total
+        logger.info("Primary 수집 배치: %d/%d개 (커서 %d)", len(batch), total, self._primary_cursor)
+        for ticker, name in batch:
             logger.debug("Collecting primary: %s (%s)", ticker, name)
             basic = self.collect_basic(ticker)
             candles = self.collect_candles_1m(ticker)
@@ -932,14 +962,31 @@ class KiwoomCollector:
             candles = self.collect_candles_1m(ticker, count=INTEREST_CANDLE_COUNT)
             self._update_stock_data(ticker, name, basic, candles_1m=candles)
 
-    def collect_daily_candles(self) -> None:
-        """Collect daily candles for all tickers."""
-        all_tickers = {**self._tickers, **self._interest_tickers}
-        logger.info("일봉 수집 시작: %d종목", len(all_tickers))
-        for ticker, name in all_tickers.items():
+    def collect_daily_candles(self, batch_size: int = 30) -> None:
+        """Collect daily candles (rotating batch for 100+ tickers).
+
+        100+ 종목 × 0.6초 = 60초+ 소요로 틱 시간 초과 방지를 위해 batch 단위 수집.
+        전체 1사이클에 약 ceil(len/batch_size) 번 호출 필요 (매 DAILY_EVERY_N_TICKS 틱마다).
+        """
+        all_tickers = list({**self._tickers, **self._interest_tickers}.items())
+        total = len(all_tickers)
+        if total == 0:
+            return
+        if total <= batch_size:
+            batch = all_tickers
+        else:
+            start = self._daily_cursor % total
+            end = start + batch_size
+            if end <= total:
+                batch = all_tickers[start:end]
+            else:
+                batch = all_tickers[start:] + all_tickers[: end - total]
+            self._daily_cursor = end % total
+        logger.info("일봉 수집 배치: %d/%d종목 (커서 %d)", len(batch), total, self._daily_cursor)
+        for ticker, name in batch:
             candles = self.collect_candles_1d(ticker)
             if candles:
-                logger.info("일봉 수집 OK: %s %d개", name, len(candles))
+                logger.debug("일봉 수집 OK: %s %d개", name, len(candles))
             else:
                 logger.warning("일봉 수집 실패: %s (%s)", name, ticker)
             self._update_stock_data(ticker, name, None, candles_1d=candles)
@@ -1049,12 +1096,15 @@ class KiwoomCollector:
     # ----- Real-time registration -----
 
     def register_real_data(self) -> None:
-        """감시종목 실시간 체결+호가 등록 (SetRealReg)."""
+        """감시종목 실시간 체결+호가 등록 (SetRealReg).
+
+        키움 제한: 화면번호당 최대 100종목. 그 이상은 화면번호 분할 필요.
+        100종목씩 분할 등록하고 마지막 배치는 남은 개수만.
+        """
         tickers = list(self._tickers.keys())
         if not tickers:
             logger.warning("register_real_data: 감시종목 없음, 실시간 등록 건너뜀")
             return
-        ticker_str = ";".join(tickers)
         # FID 목록: 10=현재가, 11=전일대비, 12=등락율, 13=누적거래량,
         #           15=거래량, 228=체결강도, 41=매도호가1, 51=매수호가1,
         #           61=매도잔량1, 71=매수잔량1, 42~45=매도호가2~5, 52~55=매수호가2~5,
@@ -1067,11 +1117,22 @@ class KiwoomCollector:
             "44;54;64;74;"
             "45;55;65;75"
         )
-        self.api.dynamicCall(
-            "SetRealReg(QString, QString, QString, QString)",
-            ["9001", ticker_str, fid_list, "0"],
-        )
-        logger.info("실시간 등록 완료: %d종목", len(tickers))
+        REAL_SCREEN_LIMIT = 100
+        num_screens = (len(tickers) + REAL_SCREEN_LIMIT - 1) // REAL_SCREEN_LIMIT
+        # 각 화면은 독립적으로 신규 등록(opt_type="0") — 재시작 시 기존 등록 덮어쓰기로 안전
+        # opt_type="1"(추가)은 같은 화면에 티커를 더 넣을 때만 사용
+        for batch_idx in range(num_screens):
+            start = batch_idx * REAL_SCREEN_LIMIT
+            batch = tickers[start:start + REAL_SCREEN_LIMIT]
+            screen_no = str(9001 + batch_idx)
+            ticker_str = ";".join(batch)
+            # 각 화면은 "0"(신규)으로 독립 등록 — 재시작 시 덮어쓰기 안전
+            self.api.dynamicCall(
+                "SetRealReg(QString, QString, QString, QString)",
+                [screen_no, ticker_str, fid_list, "0"],
+            )
+            logger.info("실시간 등록 화면%s: %d종목 (opt_type=0/신규)", screen_no, len(batch))
+        logger.info("실시간 등록 완료: %d종목 (화면 %d개)", len(tickers), num_screens)
 
     # ----- Real-time data callback -----
 
@@ -1157,16 +1218,16 @@ def main() -> None:
             # 1. Primary watch: basic + 5min candles (every tick)
             collector.collect_primary()
 
-            # 2. Interest stocks (every INTEREST_EVERY_N_TICKS)
-            if tick_count % INTEREST_EVERY_N_TICKS == 0:
+            # 2. Interest stocks: 첫 틱에서 즉시 + 이후 주기적 수집
+            if tick_count == 1 or tick_count % INTEREST_EVERY_N_TICKS == 0:
                 collector.collect_interest()
 
-            # 3. Account balance (every ACCOUNT_EVERY_N_TICKS)
-            if tick_count % ACCOUNT_EVERY_N_TICKS == 0:
+            # 3. Account balance: 첫 틱에서 즉시 + 이후 주기적 수집
+            if tick_count == 1 or tick_count % ACCOUNT_EVERY_N_TICKS == 0:
                 collector.collect_account_balance()
 
-            # 4. Daily candles (every DAILY_EVERY_N_TICKS)
-            if tick_count % DAILY_EVERY_N_TICKS == 0:
+            # 4. Daily candles: 첫 틱에서 즉시 + 이후 주기적 수집
+            if tick_count == 1 or tick_count % DAILY_EVERY_N_TICKS == 0:
                 collector.collect_daily_candles()
 
             # 5. Process order queue

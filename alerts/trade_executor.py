@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime
 
 from alerts.file_io import (
@@ -71,12 +72,24 @@ def _configure(
 # 매수 금액 계산
 # ---------------------------------------------------------------------------
 
-def _calc_trade_amount() -> int:
-    """예수금 기반 슬롯별 매수 금액 계산."""
+def _calc_trade_amount(price: int = 0) -> int:
+    """예수금 기반 슬롯별 매수 금액 계산.
+
+    MOCK 모드에서 MOCK_SEED_MONEY가 설정되어 있으면 실제 예수금 대신 가상 시드머니 사용.
+
+    Args:
+        price: 대상 종목 현재가. 전달되면 슬롯 예산이 1주 미만일 때 1주 금액까지 증액 허용
+               (비싼 종목도 매수 가능하도록). 예수금은 절대 초과하지 않음.
+    """
     try:
         with open(KIWOOM_DATA_PATH, "r", encoding="utf-8") as f:
             kd = json.load(f)
         balance = int(kd.get("account", {}).get("balance", 0))
+        # MOCK 모드 + MOCK_SEED_MONEY 설정 시 가상 시드 사용 (실제 예수금 무시)
+        if MOCK_MODE:
+            mock_seed = int(os.getenv("MOCK_SEED_MONEY", "0") or "0")
+            if mock_seed > 0:
+                balance = mock_seed
         if balance <= 0 and not MOCK_MODE:
             logger.info("[시드머니] 예수금 0 → 매수 불가")
             return 0
@@ -84,14 +97,15 @@ def _calc_trade_amount() -> int:
             # MOCK 모드에서 예수금 0이면 AUTO_TRADE_AMOUNT 사용
             return AUTO_TRADE_AMOUNT
 
-        # 레짐별 max_slots 오버라이드
+        # 레짐별 max_slots 오버라이드 (MOCK은 가상 매매 테스트 위해 레짐 제약 우회)
         effective_max_slots = MAX_SLOTS
-        try:
-            from strategies.regime_engine import get_regime_engine
-            _rp = get_regime_engine().params
-            effective_max_slots = min(MAX_SLOTS, _rp.max_slots)
-        except Exception:
-            pass
+        if not MOCK_MODE:
+            try:
+                from strategies.regime_engine import get_regime_engine
+                _rp = get_regime_engine().params
+                effective_max_slots = min(MAX_SLOTS, _rp.max_slots)
+            except Exception:
+                pass
 
         # manual 포지션은 슬롯에서 제외
         all_pos = load_auto_positions()
@@ -102,8 +116,14 @@ def _calc_trade_amount() -> int:
             logger.info("[시드머니] 슬롯 꽉참 (%d/%d)", holding_count, effective_max_slots)
             return 0
         amount = balance // free_slots
-        if amount > MAX_ORDER_AMOUNT:
-            amount = MAX_ORDER_AMOUNT
+        # 비싼 종목 매수 허용: 슬롯 예산 < 1주 가격이면 1주 금액까지 증액 (예수금 내)
+        if price > 0 and amount < price:
+            if price <= balance:
+                logger.info("[시드머니] 슬롯예산 %s원 < 현재가 %s원 → 1주 금액으로 증액", f"{amount:,}", f"{price:,}")
+                amount = price
+            else:
+                logger.info("[시드머니] 현재가 %s원 > 예수금 %s원 → 매수 불가", f"{price:,}", f"{balance:,}")
+                return 0
         if amount < 10000:
             logger.info("[시드머니] 슬롯 예산 %s원 < 최소 1만원 → 매수 불가", f"{amount:,}")
             return 0
@@ -164,12 +184,12 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
         if not ai_decision:
             logger.debug("[자동매매] %s AI 미응답 → AI 없이 진행", name)
 
-        # 방어 체크
-        if is_monthly_loss_exceeded():
-            logger.warning("[자동매매] 월간 손실 한도 초과 → 매수 차단")
+        # 방어 체크 (MOCK은 별도 파일 기준)
+        if is_monthly_loss_exceeded(mock=MOCK_MODE):
+            logger.warning("[자동매매] 월간 손실 한도 초과 → 매수 차단%s", " [MOCK]" if MOCK_MODE else "")
             return
-        if is_consec_stoploss_exceeded():
-            logger.warning("[자동매매] 연속 손절 한도 초과 → 매수 차단")
+        if is_consec_stoploss_exceeded(mock=MOCK_MODE):
+            logger.warning("[자동매매] 연속 손절 한도 초과 → 매수 차단%s", " [MOCK]" if MOCK_MODE else "")
             return
         if is_daily_loss_exceeded():
             logger.warning("[자동매매] 일일 손실 한도 초과 → 매수 차단")
@@ -195,13 +215,13 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
             logger.info("[자동매매] %s 필터 제외: %s", name, reason)
             return
 
-        # 금액 계산
-        amount = _calc_trade_amount()
-        if amount <= 0:
-            return
-
+        # 금액 계산 (price를 먼저 구해서 전달 — 비싼 종목 1주 매수 허용 로직 활용)
         price = int(stock.get("current_price", 0))
         if price <= 0:
+            return
+
+        amount = _calc_trade_amount(price=price)
+        if amount <= 0:
             return
         quantity = amount // price
         if quantity <= 0:

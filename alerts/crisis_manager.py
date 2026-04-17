@@ -230,9 +230,9 @@ def _check_crisis_meanrev(data: dict) -> None:
                         f"⚠️ 모의투자" + CMD_FOOTER,
                     )
                     if pnl < 0:
-                        record_loss_and_stoploss(abs(pnl))
+                        record_loss_and_stoploss(abs(pnl), mock=True)
                     else:
-                        reset_consec_stoploss()
+                        reset_consec_stoploss(mock=True)
                     try:
                         from trading.trade_journal import record_trade
                         record_trade(ticker=ticker, name=name, side="sell", quantity=qty,
@@ -266,7 +266,8 @@ def _check_crisis_meanrev(data: dict) -> None:
         if _crisis_mr_position is not None:
             continue
 
-        if is_daily_loss_exceeded() or is_monthly_loss_exceeded() or is_consec_stoploss_exceeded():
+        _is_mock = _trade_exec.OPERATION_MODE == "MOCK"
+        if is_daily_loss_exceeded() or is_monthly_loss_exceeded(mock=_is_mock) or is_consec_stoploss_exceeded(mock=_is_mock):
             continue
 
         # 킬스위치: 계좌 잔고가 초기 자본의 90% 이하면 매매 중단

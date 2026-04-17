@@ -49,9 +49,18 @@ def get_admin_id() -> str:
 # ------------------------------------------------------------------
 
 def start_telegram_commander() -> None:
-    """별도 데몬 스레드에서 텔레그램 polling 시작."""
+    """별도 데몬 스레드에서 텔레그램 polling 시작.
+
+    주의: 같은 봇 토큰을 여러 PC에서 polling하면 텔레그램 API가 409 Conflict를 반환함.
+    .env의 TELEGRAM_COMMANDER_ENABLED=false로 설정하면 polling 비활성화 (알림 송신은 유지).
+    PC 한 대에서만 true로 설정할 것.
+    """
     if not _BOT_TOKEN:
         logger.warning("TELEGRAM_BOT_TOKEN 미설정 — 텔레그램 commander 비활성화")
+        return
+    enabled = os.getenv("TELEGRAM_COMMANDER_ENABLED", "true").lower() == "true"
+    if not enabled:
+        logger.info("TELEGRAM_COMMANDER_ENABLED=false — 텔레그램 명령 수신 비활성화 (알림 송신은 유지)")
         return
     t = threading.Thread(target=_polling_loop, daemon=True, name="TelegramCommander")
     t.start()
