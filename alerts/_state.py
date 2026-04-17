@@ -76,6 +76,40 @@ logger.info("전략: %s", _STRATEGY.name)
 INTEREST_SPIKE_THRESHOLD = 3.0
 MAX_SELL_FAIL_BEFORE_REMOVE = 5
 
+
+# ---------------------------------------------------------------------------
+# 공통 헬퍼: TRADING_STYLE 정규화 (intent 필드 값 = EOD 청산 판정 master key)
+# ---------------------------------------------------------------------------
+
+_VALID_TRADING_STYLES = ("daytrading", "swing")
+
+
+def get_trading_intent() -> str:
+    """환경변수 TRADING_STYLE을 정규화하여 포지션 intent 값으로 반환.
+
+    - "daytrading" / "swing"만 유효. 그 외(오타 포함)면 warning 로그 + swing fallback.
+    - 반환값은 포지션 dict의 "intent" 필드, EOD 청산 판정의 master key.
+    """
+    import os
+    raw = (os.getenv("TRADING_STYLE", "swing") or "swing").strip().lower()
+    if raw in _VALID_TRADING_STYLES:
+        return raw
+    logger.warning(
+        "[설정] TRADING_STYLE 값 '%s'는 유효하지 않음 (허용: %s) → swing으로 fallback",
+        raw, _VALID_TRADING_STYLES,
+    )
+    return "swing"
+
+
+def derive_eod_liquidation_from_style() -> bool:
+    """TRADING_STYLE → EOD 청산 여부 자동 파생.
+
+    - daytrading → True (하루 마감 시 전부 청산)
+    - swing → False (다음 날로 보유)
+    - TradingConfig.eod_liquidation이 명시 설정되어 있으면 그 값이 우선함(별도 처리).
+    """
+    return get_trading_intent() == "daytrading"
+
 # ---------------------------------------------------------------------------
 # 인메모리 상태 변수
 # ---------------------------------------------------------------------------

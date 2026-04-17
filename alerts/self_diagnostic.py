@@ -13,8 +13,14 @@ logger = logging.getLogger("stock_analysis")
 ROOT = Path(__file__).parent.parent
 
 
-def run_diagnostic() -> list[tuple[str, bool, str]]:
-    """자가 진단 실행. (항목명, 정상여부, 상세) 리스트 반환."""
+def run_diagnostic(send_test_message: bool = False) -> list[tuple[str, bool, str]]:
+    """자가 진단 실행. (항목명, 정상여부, 상세) 리스트 반환.
+
+    Args:
+        send_test_message: True이면 텔레그램 테스트 메시지를 실제로 발송.
+            Heartbeat에서 주기적으로 호출할 때는 False로 설정해 스팸 방지.
+            시작 시 1회 진단(run_and_report)에서만 True.
+    """
     results = []
 
     # 1. Python 정상?
@@ -86,16 +92,22 @@ def run_diagnostic() -> list[tuple[str, bool, str]]:
     else:
         results.append(("데이터 폴더", False, "디렉토리 생성 불가"))
 
-    # 6. 텔레그램 발송 테스트?
+    # 6. 텔레그램 설정/발송 테스트
+    # send_test_message=True(시작 1회 진단)일 때만 실제 발송하여 스팸 방지.
+    # False일 때는 토큰/chat_id 설정만 검증.
     try:
         from alerts.telegram_notifier import TelegramNotifier
         notifier = TelegramNotifier()
-        # 실제 테스트 발송
-        ok = notifier.send_message("🔧 자가 진단 텔레그램 테스트")
-        if ok:
-            results.append(("텔레그램", True, "발송 성공"))
+        if not notifier.bot_token or not notifier.default_chat_id:
+            results.append(("텔레그램", False, "토큰/chat_id 미설정"))
+        elif send_test_message:
+            ok = notifier.send_message("🔧 자가 진단 텔레그램 테스트")
+            if ok:
+                results.append(("텔레그램", True, "발송 성공"))
+            else:
+                results.append(("텔레그램", False, "발송 실패"))
         else:
-            results.append(("텔레그램", False, "발송 실패"))
+            results.append(("텔레그램", True, "설정 OK (발송 스킵)"))
     except Exception as e:
         results.append(("텔레그램", False, str(e)[:50]))
 
@@ -140,13 +152,49 @@ def run_diagnostic() -> list[tuple[str, bool, str]]:
     except Exception as e:
         results.append(("포지션", False, str(e)[:50]))
 
+    # 9. 키움 수집기 살아있나? (kiwoom_data.json 갱신 시각 체크)
+    # 장중에는 최근 3분 내 갱신, 장외는 체크 생략(정상).
+    try:
+        import json
+        from datetime import datetime
+        kd_path = ROOT / "data" / "kiwoom_data.json"
+        if not kd_path.exists():
+            results.append(("키움 수집기", False, "kiwoom_data.json 없음 — 수집기 미실행?"))
+        else:
+            with open(kd_path, "r", encoding="utf-8") as f:
+                kd = json.load(f)
+            updated_at = kd.get("updated_at", "")
+            now = datetime.now()
+            is_market_time = (
+                now.weekday() < 5
+                and (now.hour == 9 or (10 <= now.hour <= 14) or (now.hour == 15 and now.minute <= 30))
+            )
+            if not updated_at:
+                results.append(("키움 수집기", False, "updated_at 없음"))
+            else:
+                try:
+                    upd = datetime.fromisoformat(updated_at.split(".")[0])
+                    age = (now - upd).total_seconds()
+                    if is_market_time:
+                        if age > 180:
+                            results.append(("키움 수집기", False, f"갱신 {int(age)}초 전 — 수집기 멈춤?"))
+                        else:
+                            results.append(("키움 수집기", True, f"정상 (갱신 {int(age)}초 전)"))
+                    else:
+                        # 장외: 체크 생략 (정상)
+                        results.append(("키움 수집기", True, f"장외 (마지막 갱신 {updated_at[:16]})"))
+                except ValueError:
+                    results.append(("키움 수집기", False, f"시각 파싱 실패: {updated_at[:30]}"))
+    except Exception as e:
+        results.append(("키움 수집기", False, str(e)[:50]))
+
     return results
 
 
 def run_and_report() -> None:
-    """자가 진단 실행 + 텔레그램 항목별 결과 발송."""
+    """자가 진단 실행 + 텔레그램 항목별 결과 발송. (시작 1회용)"""
     logger.info("[자가진단] 시작...")
-    results = run_diagnostic()
+    results = run_diagnostic(send_test_message=True)
 
     # 결과 메시지 생성
     lines = ["🔧 [시작 자가 진단 결과]", ""]

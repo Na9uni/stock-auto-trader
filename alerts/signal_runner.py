@@ -598,12 +598,25 @@ def check_eod_liquidation() -> None:
     liquidated = []
 
     for ticker, pos in list(positions.items()):
-        # manual, 추세추종, 이미 매도 중인 포지션 제외
+        # manual, 이미 매도 중, swing 의도 포지션은 제외
         if pos.get("manual"):
             continue
-        if pos.get("strategy") == "trend_following":
-            continue
         if pos.get("selling"):
+            continue
+
+        # 위기 평균회귀(RSI2 반등) 포지션은 전용 로직에서 관리 — EOD 청산 대상 아님.
+        # rule_name이 TRADING_STYLE과 무관하게 항상 우선 스킵.
+        if "위기MR" in pos.get("rule_name", ""):
+            continue
+
+        # intent 기반 판정 (새 포지션) + strategy 태그 fallback (legacy 포지션)
+        # intent="swing" → 청산 제외 (데이 넘어 보유)
+        # intent 없음/빈 문자열이면 legacy strategy 태그로 판단 (방어: 수동 편집 대비)
+        intent = pos.get("intent")
+        if intent == "swing":
+            continue
+        if (intent in (None, "")) and pos.get("strategy") == "trend_following":
+            # 구 포지션(intent 필드 없음/빈 값): legacy 로직 유지
             continue
 
         name = pos.get("name", ticker)
@@ -793,17 +806,39 @@ def check_heartbeat() -> None:
         now = datetime.now()
 
         emoji = regime_emoji.get(regime, "⚪")
+
+        # 자가진단 실행 (사용자 요청: 30분마다 heartbeat에 항목별 결과 포함)
+        diag_lines: list[str] = []
+        diag_all_ok = True
+        try:
+            from alerts.self_diagnostic import run_diagnostic
+            results = run_diagnostic()
+            diag_lines.append("")
+            diag_lines.append("🔧 [자가진단]")
+            for dname, ok, detail in results:
+                icon = "✅" if ok else "❌"
+                diag_lines.append(f"  {icon} {dname}: {detail}")
+                if not ok:
+                    diag_all_ok = False
+        except Exception as diag_err:
+            diag_lines.append(f"\n⚠️ 자가진단 실패: {diag_err}")
+            diag_all_ok = False
+
+        header = "✅ [정상 작동 중]" if diag_all_ok else "⚠️ [이상 감지]"
         msg = (
-            f"✅ [정상 작동 중] {now.strftime('%H:%M')}\n"
+            f"{header} {now.strftime('%H:%M')}\n"
             f"레짐: {emoji} {regime.value.upper()}\n"
             f"보유: 자동 {auto_count}종목 / manual {manual_count}종목\n"
             f"오늘: 매수 {today_buys}건 / 매도 {today_sells}건"
         )
         if today_pnl != 0:
             msg += f" / 손익 {today_pnl:+,}원"
+        if diag_lines:
+            msg += "\n" + "\n".join(diag_lines)
 
         notifier = TelegramNotifier()
         notifier.send_to_users([get_admin_id()], msg)
-        logger.info("[하트비트] 정상 작동 알림 발송")
+        logger.info("[하트비트] 정상 작동 알림 발송 (자가진단 %s)",
+                    "OK" if diag_all_ok else "이상")
     except Exception as e:
         logger.error("[하트비트] 알림 실패: %s", e)

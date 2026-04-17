@@ -43,6 +43,8 @@ class ComboStrategy:
             )
 
         # 거부권 통과 → 매수 확정
+        # underlying_strategy: dispatcher가 이름을 덮어써도 기반 전략(VB)을 보존하여
+        # 하위 로직(저점 필터 등)이 돌파 매수 특성에 맞게 분기할 수 있게 함.
         return SignalResult(
             signal_type=SignalType.BUY,
             strength=SignalStrength.STRONG,
@@ -50,4 +52,5 @@ class ComboStrategy:
             reasons=vb_signal.reasons + ["합산 거부권 통과"],
             target_price=vb_signal.target_price,
             strategy_name=self.name,
+            underlying_strategy=self._vb.name,
         )

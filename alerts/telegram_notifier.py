@@ -76,36 +76,58 @@ class TelegramNotifier:
     # ------------------------------------------------------------------
 
     def _post_message(self, chat_id: str, text: str) -> bool:
-        """텔레그램 sendMessage API 호출. 실패 시 3초 후 1회 재시도."""
+        """텔레그램 sendMessage API 호출.
+
+        1차: HTML parse_mode, 2차: plain text fallback (< 문자 등 HTML 파싱 실패 대비),
+        3차: 3초 대기 후 plain text 재시도.
+        """
         import time as _time
 
         url = f"{self.base_url}/sendMessage"
-        payload = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "HTML",
-        }
-        for attempt in range(2):
+
+        def _try(use_html: bool) -> tuple[bool, int, str]:
+            payload: dict = {"chat_id": chat_id, "text": text}
+            if use_html:
+                payload["parse_mode"] = "HTML"
             try:
                 resp = requests.post(url, json=payload, timeout=10)
                 if resp.status_code == 200 and resp.json().get("ok"):
-                    return True
-                logger.error(
-                    "텔레그램 발송 실패 chat_id=%s status=%s body=%s (attempt=%d)",
-                    chat_id,
-                    resp.status_code,
-                    resp.text[:200],
-                    attempt + 1,
-                )
-                if attempt == 0:
-                    _time.sleep(3)
+                    return True, resp.status_code, ""
+                return False, resp.status_code, resp.text[:200]
             except requests.RequestException as exc:
-                logger.error(
-                    "텔레그램 발송 예외 chat_id=%s error=%s (attempt=%d)",
-                    chat_id, exc, attempt + 1,
-                )
-                if attempt == 0:
-                    _time.sleep(3)
+                return False, 0, str(exc)
+
+        # 1차: HTML 모드
+        ok, status, body = _try(use_html=True)
+        if ok:
+            return True
+
+        # 2차: 400 parse 에러는 즉시 plain text로 fallback
+        if status == 400 and "parse entities" in body:
+            ok, status2, body2 = _try(use_html=False)
+            if ok:
+                logger.info("텔레그램 HTML 파싱 실패 → plain text로 재발송 성공 chat_id=%s", chat_id)
+                return True
+            logger.error(
+                "텔레그램 발송 실패(plain fallback) chat_id=%s status=%s body=%s",
+                chat_id, status2, body2,
+            )
+            return False
+
+        logger.error(
+            "텔레그램 발송 실패 chat_id=%s status=%s body=%s (attempt=1)",
+            chat_id, status, body,
+        )
+
+        # 3차: 3초 대기 후 plain text로 재시도 (네트워크 일시 오류 대비)
+        _time.sleep(3)
+        ok, status3, body3 = _try(use_html=False)
+        if ok:
+            return True
+        logger.error(
+            "텔레그램 발송 실패 chat_id=%s status=%s body=%s (attempt=2)",
+            chat_id, status3, body3,
+        )
         return False
 
 

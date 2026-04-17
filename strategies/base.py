@@ -36,6 +36,11 @@ class SignalResult:
     # 변동성 돌파 전용
     target_price: int = 0
     strategy_name: str = ""
+    # 실제 신호를 생성한 기반 전략 이름.
+    # AutoStrategy 같은 dispatcher가 strategy_name을 자기 이름("auto")으로 덮어써도
+    # 원본 서브전략(vb/trend/crisis_mr)은 이 필드로 보존되어 하위 로직(저점 필터 등)이
+    # 기반 전략 특성에 맞게 분기할 수 있다.
+    underlying_strategy: str = ""
 
 
 @dataclass

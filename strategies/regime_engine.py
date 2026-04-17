@@ -24,6 +24,20 @@ logger = logging.getLogger("stock_analysis")
 ROOT = Path(__file__).parent.parent
 _STATE_PATH = ROOT / "data" / "regime_state.json"
 
+# 한국 공휴일 캐시 — detect()마다 재생성되는 비용 방지 (연 단위로 1번만 생성)
+_HOLIDAY_CACHE: dict = {}
+
+
+def _get_kr_holidays(year: int):
+    """holidays.KR(years=year) 결과를 연 단위 캐싱."""
+    if year not in _HOLIDAY_CACHE:
+        try:
+            import holidays
+            _HOLIDAY_CACHE[year] = holidays.KR(years=year)
+        except Exception:
+            _HOLIDAY_CACHE[year] = None
+    return _HOLIDAY_CACHE[year]
+
 # ---------------------------------------------------------------------------
 # 1. RegimeState enum
 # ---------------------------------------------------------------------------
@@ -79,7 +93,7 @@ REGIME_PARAMS: dict[RegimeState, RegimeParams] = {
     ),
     RegimeState.SWING: RegimeParams(
         position_size_pct=0.5,
-        max_slots=1,
+        max_slots=2,  # 사용자 요청: 1→2 (스윙 시에도 분산 허용, 저점 매수 로직과 결합)
         stoploss_pct=1.5,
         trailing_activate_pct=2.0,
         trailing_stop_pct=0.8,
@@ -192,16 +206,27 @@ class RegimeEngine:
             logger.warning("[레짐] 지수 데이터 없음 — 현재 상태(%s) 유지", self._current_state.value)
             return self._current_state
 
-        # C1: 누적 하락 추적 (날짜별 1회만 기록 — 매분 호출돼도 당일 최악값만 갱신)
-        today_str = date.today().isoformat()
-        if self._recent_changes and self._recent_changes[-1][0] == today_str:
-            # 당일 이미 기록됨 → 더 나쁜 값으로 갱신
-            prev_val = self._recent_changes[-1][1]
-            self._recent_changes[-1] = (today_str, min(prev_val, worst_index_change))
+        # C1: 누적 하락 추적 (영업일별 1회만 기록 — 매분 호출돼도 당일 최악값만 갱신)
+        # 주말/공휴일에는 기록 스킵 (5일 = 5영업일 보장). 공휴일은 연 단위 캐싱.
+        today = date.today()
+        _is_business_day = True
+        if today.weekday() >= 5:
+            _is_business_day = False
         else:
-            # 새 날짜 → 추가
-            self._recent_changes.append((today_str, worst_index_change))
-            self._recent_changes = self._recent_changes[-5:]  # 최근 5일만 유지
+            kr_holidays = _get_kr_holidays(today.year)
+            if kr_holidays is not None and today in kr_holidays:
+                _is_business_day = False
+
+        if _is_business_day:
+            today_str = today.isoformat()
+            if self._recent_changes and self._recent_changes[-1][0] == today_str:
+                # 당일 이미 기록됨 → 더 나쁜 값으로 갱신
+                prev_val = self._recent_changes[-1][1]
+                self._recent_changes[-1] = (today_str, min(prev_val, worst_index_change))
+            else:
+                # 새 영업일 → 추가
+                self._recent_changes.append((today_str, worst_index_change))
+                self._recent_changes = self._recent_changes[-5:]  # 최근 5영업일만 유지
 
         # config에서 임계값 가져오기
         defense_trigger = getattr(self._config, "regime_defense_trigger_pct", -2.0)

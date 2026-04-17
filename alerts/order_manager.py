@@ -360,13 +360,16 @@ def _handle_buy_execution(order: dict, name: str) -> None:
                 _ep = int(order.get("exec_price") or price)
             except (ValueError, TypeError):
                 _ep = price
-            # Determine strategy mode from regime (EOD liquidation용)
+            # Determine strategy mode from regime (EOD liquidation용 — legacy)
             try:
                 from strategies.regime_engine import get_regime_engine
                 _regime = get_regime_engine().state.value
                 _strategy_tag = "trend_following" if _regime in ("swing", "defense", "cash") else "vb"
             except Exception:
                 _strategy_tag = rule_name.split("_")[0] if "_" in rule_name else ""
+            # TRADING_STYLE 기반 intent (EOD 청산 판정용 — 레짐 전환 무관하게 고정)
+            from alerts._state import get_trading_intent as _get_intent
+            _intent = _get_intent()
             positions[ticker] = {
                 "name": name,
                 "qty": quantity,
@@ -375,7 +378,8 @@ def _handle_buy_execution(order: dict, name: str) -> None:
                 "order_id": order_id,
                 "high_price": _ep,
                 "rule_name": rule_name,
-                "strategy": _strategy_tag,
+                "strategy": _strategy_tag,  # legacy
+                "intent": _intent,
             }
             save_auto_positions(positions)
             logger.info("[포지션 추가] %s %d주 @%s", name, quantity, f"{_ep:,}")

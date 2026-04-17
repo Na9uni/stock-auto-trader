@@ -87,7 +87,14 @@ class TradingConfig:
             strategy=os.getenv("STRATEGY", "auto").lower(),
             buy_start_minute=int(os.getenv("BUY_START_MINUTE", "10")),
             buy_end_hour=int(os.getenv("BUY_END_HOUR", "15")),
-            eod_liquidation=os.getenv("EOD_LIQUIDATION", "true").lower() == "true",
+            # EOD_LIQUIDATION: 명시 설정이 있으면 우선, 없으면 TRADING_STYLE에서 자동 파생.
+            #  - daytrading → True, swing → False (일관성 자동 보장)
+            #  - 둘 다 설정하면 EOD_LIQUIDATION이 우선 (명시 오버라이드)
+            eod_liquidation=(
+                os.getenv("EOD_LIQUIDATION").lower() == "true"
+                if os.getenv("EOD_LIQUIDATION") is not None
+                else os.getenv("TRADING_STYLE", "swing").strip().lower() == "daytrading"
+            ),
             regime_defense_trigger_pct=float(os.getenv("REGIME_DEFENSE_TRIGGER_PCT", "-2.0")),
             regime_cash_trigger_pct=float(os.getenv("REGIME_CASH_TRIGGER_PCT", "-3.0")),
             regime_swing_volatility_pct=float(os.getenv("REGIME_SWING_VOLATILITY_PCT", "3.0")),

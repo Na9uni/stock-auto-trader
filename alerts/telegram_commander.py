@@ -49,9 +49,18 @@ def get_admin_id() -> str:
 # ------------------------------------------------------------------
 
 def start_telegram_commander() -> None:
-    """별도 데몬 스레드에서 텔레그램 polling 시작."""
+    """별도 데몬 스레드에서 텔레그램 polling 시작.
+
+    .env의 TELEGRAM_COMMANDER_ENABLED=false면 실행 안 함 (서브 PC용).
+    같은 봇을 두 PC에서 polling하면 409 Conflict 에러가 반복 발생하므로,
+    메인 PC에서만 commander를 돌리고 서브는 알림 발송만 담당한다.
+    """
     if not _BOT_TOKEN:
         logger.warning("TELEGRAM_BOT_TOKEN 미설정 — 텔레그램 commander 비활성화")
+        return
+    enabled = os.getenv("TELEGRAM_COMMANDER_ENABLED", "true").strip().lower()
+    if enabled in ("false", "0", "no", "off"):
+        logger.info("TELEGRAM_COMMANDER_ENABLED=false — 텔레그램 commander 비활성화 (서브 PC 모드)")
         return
     t = threading.Thread(target=_polling_loop, daemon=True, name="TelegramCommander")
     t.start()
@@ -80,8 +89,16 @@ def _polling_loop() -> None:
             time.sleep(_POLLING_INTERVAL)
 
 
+_last_error_code: int | None = None  # 반복 에러 스팸 억제용
+
+
 def _get_updates(offset: int | None) -> list[dict]:
-    """텔레그램 getUpdates 호출."""
+    """텔레그램 getUpdates 호출.
+
+    같은 에러 코드가 연속 발생하면 1회만 로깅 (예: 409 Conflict — 봇이
+    다른 인스턴스에서도 돌아갈 때 발생, 스팸 방지).
+    """
+    global _last_error_code
     params: dict[str, Any] = {"timeout": _POLLING_TIMEOUT}
     if offset is not None:
         params["offset"] = offset
@@ -93,10 +110,21 @@ def _get_updates(offset: int | None) -> list[dict]:
         )
         data = resp.json()
         if data.get("ok"):
+            if _last_error_code is not None:
+                logger.info("getUpdates 정상 복귀 (이전 에러 %s 해소)", _last_error_code)
+                _last_error_code = None
             return data.get("result", [])
-        logger.error("getUpdates 실패: %s", data)
+        err_code = data.get("error_code")
+        if err_code != _last_error_code:
+            logger.warning("getUpdates 실패: %s", data)
+            _last_error_code = err_code
+        # 409 Conflict(다른 인스턴스와 봇 공유)는 긴 대기로 폴링 빈도 낮춤
+        if err_code == 409:
+            time.sleep(30)
     except requests.RequestException as exc:
-        logger.error("getUpdates 예외: %s", exc)
+        if _last_error_code != -1:
+            logger.error("getUpdates 예외: %s", exc)
+            _last_error_code = -1
     return []
 
 
