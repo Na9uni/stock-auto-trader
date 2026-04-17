@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime
+from pathlib import Path
 
 from alerts.file_io import (
     KIWOOM_DATA_PATH,
@@ -28,6 +29,62 @@ logger = logging.getLogger("stock_analysis")
 # ---------------------------------------------------------------------------
 
 _buy_in_progress: set[str] = set()
+
+# ---------------------------------------------------------------------------
+# 손실 한도 알림 (텔레그램, 하루 1회 쿨다운, 파일 영속화)
+# ---------------------------------------------------------------------------
+
+_LOSS_LIMIT_ALERT_PATH = Path(__file__).parent.parent / "data" / "loss_limit_alert.json"
+_LOSS_LIMIT_COOLDOWN_SEC = 86400  # 24h — 같은 한도는 하루 1번만 알림
+
+
+def _read_loss_limit_alerts() -> dict:
+    try:
+        if not _LOSS_LIMIT_ALERT_PATH.exists():
+            return {}
+        with open(_LOSS_LIMIT_ALERT_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _write_loss_limit_alerts(data: dict) -> None:
+    try:
+        _LOSS_LIMIT_ALERT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _LOSS_LIMIT_ALERT_PATH.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        tmp.replace(_LOSS_LIMIT_ALERT_PATH)
+    except Exception as e:
+        logger.warning("[loss_limit] 알림 파일 저장 실패: %s", e)
+
+
+def _notify_loss_limit(kind: str, message: str) -> None:
+    """손실 한도 초과 텔레그램 알림. 같은 kind는 24h 쿨다운.
+
+    kind: "monthly" | "daily" | "consec"
+    """
+    now = datetime.now()
+    alerts = _read_loss_limit_alerts()
+    last_str = alerts.get(kind)
+    if last_str:
+        try:
+            last = datetime.fromisoformat(last_str)
+            if (now - last).total_seconds() < _LOSS_LIMIT_COOLDOWN_SEC:
+                return
+        except (ValueError, TypeError):
+            pass
+    alerts[kind] = now.isoformat()
+    _write_loss_limit_alerts(alerts)
+    try:
+        from alerts.telegram_notifier import TelegramNotifier
+        TelegramNotifier().send_to_users(
+            [get_admin_id()],
+            message + CMD_FOOTER,
+        )
+    except Exception as e:
+        logger.warning("[loss_limit] 텔레그램 알림 실패: %s", e)
+
 
 # ---------------------------------------------------------------------------
 # 설정 (analysis_scheduler에서 주입)
@@ -180,12 +237,31 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
         # 방어 체크
         if is_monthly_loss_exceeded():
             logger.warning("[자동매매] 월간 손실 한도 초과 → 매수 차단")
+            _notify_loss_limit(
+                "monthly",
+                "🛑 [월 손실 한도 초과]\n"
+                "신규 매수 중단\n"
+                "→ 다음 달 1일 자동 재개\n"
+                "※ 기존 포지션 관리(손절/트레일링)는 계속 작동",
+            )
             return
         if is_consec_stoploss_exceeded():
             logger.warning("[자동매매] 연속 손절 한도 초과 → 매수 차단")
+            _notify_loss_limit(
+                "consec",
+                "⚠️ [연속 손절 한도 초과]\n"
+                "신규 매수 일시 중단\n"
+                "→ 익절 1회 발생 시 자동 재개",
+            )
             return
         if is_daily_loss_exceeded():
             logger.warning("[자동매매] 일일 손실 한도 초과 → 매수 차단")
+            _notify_loss_limit(
+                "daily",
+                "⏸️ [당일 손실 한도 초과]\n"
+                "오늘만 신규 매수 중단\n"
+                "→ 내일 09:00 자동 재개",
+            )
             return
 
         # 중복 체크 (manual 포지션은 자동매매 대상 아님)

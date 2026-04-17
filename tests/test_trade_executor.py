@@ -351,3 +351,66 @@ class TestMarketCrashFailSafe:
             lambda: {"KOSPI": {"change_pct": -3.5}},
         )
         assert market_guard._is_market_crash() is True
+
+
+# ---------------------------------------------------------------------------
+# 손실 한도 초과 텔레그램 알림 (하루 1회 쿨다운)
+# ---------------------------------------------------------------------------
+
+class TestLossLimitAlert:
+    """한도 초과 시 텔레그램 알림 + 24h 중복 방지."""
+
+    @pytest.fixture
+    def mock_notifier(self, monkeypatch):
+        """TelegramNotifier를 캡처. send_to_users 호출 내역을 리스트로 수집."""
+        calls = []
+
+        class _Mock:
+            def send_to_users(self, users, msg):
+                calls.append((users, msg))
+
+        monkeypatch.setattr("alerts.telegram_notifier.TelegramNotifier", lambda: _Mock())
+        return calls
+
+    @pytest.fixture
+    def isolated_alert_path(self, tmp_path, monkeypatch):
+        """알림 상태 파일을 tmp_path로 격리."""
+        from alerts import trade_executor
+        p = tmp_path / "loss_limit_alert.json"
+        monkeypatch.setattr(trade_executor, "_LOSS_LIMIT_ALERT_PATH", p)
+        return p
+
+    def test_first_alert_sends(self, mock_notifier, isolated_alert_path):
+        """첫 호출은 텔레그램 발송."""
+        from alerts.trade_executor import _notify_loss_limit
+        _notify_loss_limit("monthly", "테스트 메시지")
+        assert len(mock_notifier) == 1
+        assert "테스트 메시지" in mock_notifier[0][1]
+
+    def test_duplicate_alert_skipped(self, mock_notifier, isolated_alert_path):
+        """같은 kind 재호출은 24h 쿨다운으로 스킵."""
+        from alerts.trade_executor import _notify_loss_limit
+        _notify_loss_limit("monthly", "첫 번째")
+        _notify_loss_limit("monthly", "두 번째")
+        assert len(mock_notifier) == 1
+        assert "첫 번째" in mock_notifier[0][1]
+
+    def test_different_kinds_independent(self, mock_notifier, isolated_alert_path):
+        """kind가 다르면 각각 발송 (monthly/daily/consec 독립)."""
+        from alerts.trade_executor import _notify_loss_limit
+        _notify_loss_limit("monthly", "월")
+        _notify_loss_limit("daily", "일")
+        _notify_loss_limit("consec", "연속")
+        assert len(mock_notifier) == 3
+
+    def test_cooldown_expired_resends(self, mock_notifier, isolated_alert_path):
+        """24h 지난 타임스탬프는 재발송."""
+        import json as _json
+        from alerts.trade_executor import _notify_loss_limit
+        old_ts = (datetime.now() - timedelta(hours=25)).isoformat()
+        isolated_alert_path.parent.mkdir(parents=True, exist_ok=True)
+        isolated_alert_path.write_text(
+            _json.dumps({"monthly": old_ts}), encoding="utf-8"
+        )
+        _notify_loss_limit("monthly", "재발송")
+        assert len(mock_notifier) == 1
