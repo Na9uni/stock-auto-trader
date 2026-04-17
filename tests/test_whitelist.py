@@ -33,9 +33,15 @@ class TestWhitelist:
         """KODEX 코스닥150 (229200)은 ETF여야 한다."""
         assert is_etf("229200")
 
-    def test_kodex200_in_whitelist(self) -> None:
-        """KODEX 200 (069500)은 2026-04-17 확장판에서 재포함됨 (MOCK 테스트 범위 확대)."""
-        assert is_whitelisted("069500")
+    def test_kodex200_not_in_trade_whitelist(self) -> None:
+        """KODEX 200 (069500)은 백테스트 미검증 — 매매 허용 X, 감시는 O.
+
+        2026-04-17 리스크 매니저 VETO: MDD 26.7%로 AUTO_TRADE_WHITELIST 제외.
+        MOCK_WATCH_EXTENDED에만 포함되어 신호 감지/알림만 가능.
+        """
+        from config.whitelist import is_watched
+        assert not is_whitelisted("069500"), "매매 허용 차단됨"
+        assert is_watched("069500"), "감시 대상엔 포함"
 
     def test_per_ticker_k(self) -> None:
         assert get_ticker_k("131890") == 0.3   # ACE 삼성그룹동일가중

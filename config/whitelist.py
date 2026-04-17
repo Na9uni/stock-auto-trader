@@ -3,15 +3,15 @@
 K-value 최적화 (2021-01~2026-04, Sharpe 기준) 결과 반영:
   제거 기준 — Sharpe<0.3(전K) / PF<1.0(전K) / MDD>25%
 
-주의: 2026-04-17 이후 확장판. 시총 상위 100종목 기반 MOCK 테스트용.
-    - BACKTEST_VERIFIED에 있는 종목만 백테스트 검증 완료 (MDD<25%, Sharpe>0.3)
-    - 나머지는 기본 K값 사용 + 미검증 상태로 매매 허용 → 리스크 인지 필요
-    - LIVE 전환 전 MDD/Sharpe 재검증 필수
+2026-04-17 리스크 매니저 VETO 반영:
+  - AUTO_TRADE_WHITELIST = BACKTEST_VERIFIED 7종목만 (실전/MOCK 공통 매매 허용)
+  - MOCK_WHITELIST = 시총 상위 100+ 종목 (신호 감지/watch_list용, 매매 허용 아님)
+  - LIVE와 MOCK 공통 방어선 유지 — MOCK에서도 미검증 종목 매매 금지
 """
 
 from __future__ import annotations
 
-# 백테스트 검증 완료 종목 (MDD<25%, Sharpe>0.3) — 기존 보수적 리스트
+# 백테스트 검증 완료 종목 (MDD<25%, Sharpe>0.3) — 실전/MOCK 매매 허용 대상
 BACKTEST_VERIFIED: dict[str, str] = {
     "229200": "KODEX 코스닥150",        # 최적K=0.6, Sharpe=0.55, PF=1.39, MDD=17.1%
     "131890": "ACE 삼성그룹동일가중",     # 최적K=0.3, Sharpe=1.35, PF=2.29, MDD=12.6%
@@ -22,16 +22,29 @@ BACKTEST_VERIFIED: dict[str, str] = {
     "005930": "삼성전자",                # 최적K=0.6, Sharpe=0.89, PF=1.96, MDD=15.0%
 }
 
-# ETF 종목 (변동성 돌파) — 확장 (MOCK 테스트용, 미검증 포함)
+# ETF 종목 (매매 허용) — BACKTEST_VERIFIED 중 ETF만
 ETF_WHITELIST: dict[str, str] = {
-    # 검증 완료 (기본 K 사용)
     "229200": "KODEX 코스닥150",
     "131890": "ACE 삼성그룹동일가중",
     "108450": "ACE 삼성그룹섹터가중",
     "395160": "KODEX AI반도체",
     "261220": "KODEX WTI원유선물(H)",
     "132030": "KODEX 골드선물(H)",
-    # 미검증 (MOCK 테스트 범위 확장)
+}
+
+# 개별주 (매매 허용) — BACKTEST_VERIFIED 중 개별주만
+STOCK_WHITELIST: dict[str, str] = {
+    "005930": "삼성전자",
+}
+
+# 실전 매매 허용 (BACKTEST_VERIFIED = ETF + STOCK)
+# MOCK이든 LIVE든 이 리스트만 실제 매매 대상
+AUTO_TRADE_WHITELIST: dict[str, str] = {**ETF_WHITELIST, **STOCK_WHITELIST}
+
+# MOCK 신호 감시 확장 리스트 (watch_list 수집 + 신호 감지용, 매매 불허)
+# 시총 상위 95종목 — 실제 매수 안 하고 "신호 감지만" 하여 매매 품질 분석
+MOCK_WATCH_EXTENDED: dict[str, str] = {
+    # ETF 미검증 (수집/감시만)
     "069500": "KODEX 200",
     "133690": "TIGER 미국나스닥100",
     "102780": "KODEX 삼성그룹",
@@ -46,13 +59,7 @@ ETF_WHITELIST: dict[str, str] = {
     "251340": "KODEX 코스닥150선물인버스",
     "465580": "ACE 미국배당다우존스",
     "294400": "KODEX 리츠",
-}
-
-# 개별주 — 확장 (MOCK 테스트용, 미검증 포함)
-STOCK_WHITELIST: dict[str, str] = {
-    # 검증 완료
-    "005930": "삼성전자",
-    # 미검증 (시총 상위, MOCK 테스트 범위 확장)
+    # 개별주 미검증 (수집/감시만)
     "000660": "SK하이닉스",
     "373220": "LG에너지솔루션",
     "207940": "삼성바이오로직스",
@@ -136,9 +143,6 @@ STOCK_WHITELIST: dict[str, str] = {
     "272210": "한화시스템",
 }
 
-# 전체 화이트리스트
-AUTO_TRADE_WHITELIST: dict[str, str] = {**ETF_WHITELIST, **STOCK_WHITELIST}
-
 # 종목별 최적 K값 (walk-forward 그리드서치 2021~2026 Sharpe 기준)
 # 여기에 없는 종목은 기본값 사용 (ETF: VB_K, 개별주: VB_K_INDIVIDUAL)
 TICKER_K_MAP: dict[str, float] = {
@@ -166,10 +170,36 @@ LARGECAP_DAILY_MIN_SCORE = 4
 
 
 def is_whitelisted(ticker: str) -> bool:
-    """화이트리스트 포함 여부."""
+    """매매 허용 여부 (BACKTEST_VERIFIED만).
+
+    실전 매매 및 MOCK 매매 모두 이 체크를 거침.
+    미검증 종목은 False 반환 → 매매 차단.
+    """
     return ticker in AUTO_TRADE_WHITELIST
 
 
+def is_watched(ticker: str) -> bool:
+    """감시 대상 여부 (AUTO_TRADE_WHITELIST + MOCK_WATCH_EXTENDED).
+
+    신호 감지/알림 대상. 매매 허용과 별개로 광범위 감시 가능.
+    """
+    return ticker in AUTO_TRADE_WHITELIST or ticker in MOCK_WATCH_EXTENDED
+
+
+# ETF 전체 분류 (세금 면제 판단용 — 매매 허용 여부와 별개)
+_ETF_EXTENDED_SET = (
+    set(ETF_WHITELIST.keys())
+    | {
+        "069500", "133690", "102780", "114800", "252670", "122630",
+        "091160", "117460", "305720", "091170", "176950", "251340",
+        "465580", "294400",
+    }
+)
+
+
 def is_etf(ticker: str) -> bool:
-    """ETF 종목 여부."""
-    return ticker in ETF_WHITELIST
+    """ETF 종목 여부 (세금 면제 판단용).
+
+    매매 허용 ETF(ETF_WHITELIST) + 감시 ETF 전체 포함.
+    """
+    return ticker in _ETF_EXTENDED_SET

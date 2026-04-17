@@ -16,7 +16,7 @@ from datetime import datetime
 import pandas as pd
 
 from alerts.telegram_notifier import TelegramNotifier
-from config.whitelist import is_whitelisted
+from config.whitelist import is_whitelisted, is_watched
 from strategies.base import MarketContext, SignalResult, SignalType, SignalStrength
 
 from alerts._state import (
@@ -287,22 +287,17 @@ def check_signals() -> None:
     regime_params = engine.params
     logger.debug("[신호] 레짐: %s, 파라미터: slots=%d, buy=%s", regime.value, regime_params.max_slots, regime_params.buy_allowed)
 
-    # CASH/DEFENSE 레짐 처리
-    from alerts.trade_executor import OPERATION_MODE as _OP_MODE
+    # CASH/DEFENSE 레짐 처리 — MOCK/LIVE 공통 적용 (리스크 매니저 VETO 반영)
+    # 이전 MOCK 우회는 "청산→매수 루프 방지" 목적이었으나,
+    # CASH 청산을 스킵하면 손절 방어선 자체가 무력화되어 VETO 행사됨.
+    # 대신 CASH 레짐 자체가 과도하게 자주 발동되지 않도록 macro_regime.py 임계값을 현실화해 대응.
     if regime == RegimeState.CASH:
-        if _OP_MODE == "MOCK":
-            # MOCK 모드: 청산 스킵 (매 사이클 청산→매수 루프 방지). 스윙 유지 테스트 목적.
-            logger.info("[MOCK] CASH 레짐 — 청산 스킵, 가상 매매 평가 계속")
-        else:
-            _execute_regime_liquidation(data, engine)
-            return
+        _execute_regime_liquidation(data, engine)
+        return
 
     if regime == RegimeState.DEFENSE:
-        if _OP_MODE == "MOCK":
-            logger.info("[MOCK] DEFENSE 레짐 — 축소 스킵, 가상 매매 평가 계속")
-        else:
-            _execute_defense_cuts(data, engine)
-            return
+        _execute_defense_cuts(data, engine)
+        return
 
     from ai.ai_analyzer import AIAnalyzer
     notifier = TelegramNotifier()
@@ -324,7 +319,9 @@ def check_signals() -> None:
 
     for ticker, info in data.get("stocks", {}).items():
         try:
-            if not is_whitelisted(ticker):
+            # 감시 대상 (102종목 = BACKTEST_VERIFIED 7 + MOCK_WATCH_EXTENDED 95) 체크
+            # 실제 매매는 trade_executor에서 is_whitelisted로 한번 더 필터링
+            if not is_watched(ticker):
                 continue
             name = info.get("name", ticker)
 
@@ -365,7 +362,8 @@ def check_interest_spikes() -> None:
 
         if price == 0:
             continue
-        if not is_whitelisted(ticker):
+        # 감시 대상이면 급등락 알림 허용 (매매는 아님)
+        if not is_watched(ticker):
             continue
         if abs(change_rate) < INTEREST_SPIKE_THRESHOLD:
             continue

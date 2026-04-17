@@ -97,15 +97,16 @@ def _calc_trade_amount(price: int = 0) -> int:
             # MOCK 모드에서 예수금 0이면 AUTO_TRADE_AMOUNT 사용
             return AUTO_TRADE_AMOUNT
 
-        # 레짐별 max_slots 오버라이드 (MOCK은 가상 매매 테스트 위해 레짐 제약 우회)
+        # 레짐별 max_slots 오버라이드 (MOCK/LIVE 공통 — 리스크 매니저 VETO 반영)
+        # 이전 MOCK 우회는 "CASH에서도 매수 테스트" 목적이었으나 손실 방어 약화로 VETO 행사됨.
+        # MOCK도 레짐 제약을 준수해야 실전 시뮬레이션 의미 있음.
         effective_max_slots = MAX_SLOTS
-        if not MOCK_MODE:
-            try:
-                from strategies.regime_engine import get_regime_engine
-                _rp = get_regime_engine().params
-                effective_max_slots = min(MAX_SLOTS, _rp.max_slots)
-            except Exception:
-                pass
+        try:
+            from strategies.regime_engine import get_regime_engine
+            _rp = get_regime_engine().params
+            effective_max_slots = min(MAX_SLOTS, _rp.max_slots)
+        except Exception:
+            pass
 
         # manual 포지션은 슬롯에서 제외
         all_pos = load_auto_positions()
@@ -116,13 +117,19 @@ def _calc_trade_amount(price: int = 0) -> int:
             logger.info("[시드머니] 슬롯 꽉참 (%d/%d)", holding_count, effective_max_slots)
             return 0
         amount = balance // free_slots
-        # 비싼 종목 매수 허용: 슬롯 예산 < 1주 가격이면 1주 금액까지 증액 (예수금 내)
+        # MAX_ORDER_AMOUNT 상한 복구 (리스크 매니저 VETO 반영)
+        # 단일 종목 집중 방지 — 아무리 비싼 종목이라도 MAX_ORDER_AMOUNT 초과 매수 금지
+        if amount > MAX_ORDER_AMOUNT:
+            amount = MAX_ORDER_AMOUNT
+        # 비싼 종목 1주 매수 허용 (단, MAX_ORDER_AMOUNT 범위 내에서만)
         if price > 0 and amount < price:
-            if price <= balance:
-                logger.info("[시드머니] 슬롯예산 %s원 < 현재가 %s원 → 1주 금액으로 증액", f"{amount:,}", f"{price:,}")
+            if price <= MAX_ORDER_AMOUNT and price <= balance:
+                logger.info("[시드머니] 슬롯예산 %s원 < 현재가 %s원 → 1주 금액으로 증액 (상한 %s원 내)",
+                            f"{amount:,}", f"{price:,}", f"{MAX_ORDER_AMOUNT:,}")
                 amount = price
             else:
-                logger.info("[시드머니] 현재가 %s원 > 예수금 %s원 → 매수 불가", f"{price:,}", f"{balance:,}")
+                logger.info("[시드머니] 현재가 %s원 > 주문 상한 %s원 → 매수 불가",
+                            f"{price:,}", f"{MAX_ORDER_AMOUNT:,}")
                 return 0
         if amount < 10000:
             logger.info("[시드머니] 슬롯 예산 %s원 < 최소 1만원 → 매수 불가", f"{amount:,}")
