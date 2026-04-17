@@ -10,4 +10,19 @@ logs/
 .vscode/
 data/macro_override.json
 .claude/settings.local.json
+.claude/worktrees/
 data/trade_journal.csv
+
+# PC별 독립 데이터 (아빠 PC / 아들 PC 각자 다름 — 공유 금지)
+data/auto_positions.json
+data/last_signal.json
+data/monthly_loss.json
+data/order_queue.json
+data/targets.json
+data/interest_list.json
+data/eod_comparison.json
+data/regime_state.json
+data/cooldown_state.json
+data/hard_stale_alert.json
+data/*.bak_*
+"data/kiwoom_data - 복사본.json"
