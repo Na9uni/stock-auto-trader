@@ -72,6 +72,9 @@ def _notify_loss_limit(
                    {current_loss, limit_value, positions} 형태
                    None이면 스냅샷 생략 (LIVE 또는 기존 호출 호환)
 
+    쿨다운 공유: 알림이 쿨다운으로 스킵되면 스냅샷도 함께 스킵 (의도된 동작).
+                같은 한도 초과가 짧은 시간에 여러 번 걸려도 한 번만 기록.
+
     Returns:
         True = 알림 발송됨 (쿨다운 통과), False = 쿨다운 중 스킵
     """
@@ -153,6 +156,42 @@ def _record_filter_block(filter_name: str) -> None:
         stats = {"date": today}
     stats[filter_name] = int(stats.get(filter_name, 0)) + 1
     _write_filter_stats(stats)
+
+
+def _get_today_daily_loss() -> int:
+    """order_queue.json에서 오늘 체결된 매도 주문 손실 합계.
+
+    market_guard.is_daily_loss_exceeded() 내부 로직과 동일하나,
+    실제 손실 금액을 반환 (한도 초과 여부가 아닌). 스냅샷용.
+    """
+    from alerts.file_io import ORDER_QUEUE_PATH
+    from datetime import date
+    if not ORDER_QUEUE_PATH.exists():
+        return 0
+    try:
+        with open(ORDER_QUEUE_PATH, "r", encoding="utf-8") as f:
+            queue_data = json.load(f)
+        orders = queue_data.get("orders", [])
+    except Exception:
+        return 0
+    today_str = date.today().isoformat()
+    total = 0
+    for o in orders:
+        if not isinstance(o, dict):
+            continue
+        if o.get("side") != "sell" or o.get("status") != "executed":
+            continue
+        exec_at = o.get("executed_at", "")
+        if not exec_at.startswith(today_str):
+            continue
+        sell = int(o.get("exec_price") or 0)
+        buy = int(o.get("buy_price", 0))
+        qty = int(o.get("quantity", 0))
+        if sell > 0 and buy > 0 and qty > 0:
+            pnl = (sell - buy) * qty
+            if pnl < 0:
+                total += abs(pnl)
+    return total
 
 
 def get_filter_block_stats_today() -> dict:
@@ -371,7 +410,7 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
                 "⏸️ [당일 손실 한도 초과]\n"
                 f"{'MOCK — 스냅샷 저장 후 거래 계속 (비교 실험용)' if OPERATION_MODE == 'MOCK' else '오늘만 신규 매수 중단 → 내일 09:00 자동 재개'}",
                 snapshot_info={
-                    "current_loss": 0,  # 일일 손실은 order_queue에서 집계되므로 정확치 생략
+                    "current_loss": _get_today_daily_loss(),
                     "limit_value": int(_MAX_DL),
                     "positions": load_auto_positions(),
                 },

@@ -21,6 +21,29 @@ logger = logging.getLogger("stock_analysis")
 
 _SNAPSHOT_DIR = Path(__file__).parent.parent / "data" / "performance_snapshots"
 
+# 디스크 보호 — 너무 많이 쌓이면 자동 정리 (쿨다운 24h이므로 하루 최대 3개,
+# 6개월 운영해도 약 540개 예상. 여유 있게 1000개 상한).
+_MAX_SNAPSHOTS = 1000
+
+
+def _cleanup_old_snapshots() -> None:
+    """1000개 초과 시 오래된 스냅샷부터 삭제. 디스크 보호."""
+    try:
+        if not _SNAPSHOT_DIR.exists():
+            return
+        files = sorted(_SNAPSHOT_DIR.glob("snapshot_*.json"))
+        if len(files) <= _MAX_SNAPSHOTS:
+            return
+        excess = len(files) - _MAX_SNAPSHOTS
+        for old in files[:excess]:
+            try:
+                old.unlink()
+            except Exception:
+                pass
+        logger.info("[스냅샷] 오래된 %d개 자동 정리 (최근 %d개 유지)", excess, _MAX_SNAPSHOTS)
+    except Exception as e:
+        logger.warning("[스냅샷] 자동 정리 실패: %s", e)
+
 
 def save_loss_limit_snapshot(
     kind: str,
@@ -70,6 +93,10 @@ def save_loss_limit_snapshot(
         tmp.replace(path)
 
         logger.info("[스냅샷] %s 한도 초과 기록: %s", kind, path.name)
+
+        # 1000개 초과 시 오래된 것부터 자동 정리
+        _cleanup_old_snapshots()
+
         return path
     except Exception as e:
         logger.warning("[스냅샷] 저장 실패: %s", e)

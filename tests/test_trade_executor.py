@@ -572,3 +572,48 @@ class TestLossLimitSnapshot:
         )
         files = list(isolated_snapshot_dir.glob("snapshot_*_monthly.json"))
         assert len(files) == 1  # 쿨다운 때문에 하나만
+
+
+class TestDailyLossCalc:
+    """일일 손실 실제 값 계산 (감사관 지적: 하드코딩된 0 대신)."""
+
+    def test_empty_queue_returns_zero(self, tmp_path, monkeypatch):
+        from alerts import trade_executor
+        empty = tmp_path / "order_queue.json"
+        monkeypatch.setattr("alerts.file_io.ORDER_QUEUE_PATH", empty)
+        assert trade_executor._get_today_daily_loss() == 0
+
+    def test_losses_summed_correctly(self, tmp_path, monkeypatch):
+        import json as _json
+        from alerts import trade_executor
+        today = datetime.now().strftime("%Y-%m-%d")
+        queue = {
+            "orders": [
+                {"side": "sell", "status": "executed", "executed_at": f"{today}T10:30:00",
+                 "exec_price": 19000, "buy_price": 20000, "quantity": 10},  # 손실 -10000
+                {"side": "sell", "status": "executed", "executed_at": f"{today}T14:00:00",
+                 "exec_price": 21000, "buy_price": 20000, "quantity": 10},  # 수익 +10000 (무시)
+                {"side": "sell", "status": "executed", "executed_at": f"{today}T15:10:00",
+                 "exec_price": 19500, "buy_price": 20000, "quantity": 20},  # 손실 -10000
+            ]
+        }
+        q_path = tmp_path / "order_queue.json"
+        q_path.write_text(_json.dumps(queue), encoding="utf-8")
+        monkeypatch.setattr("alerts.file_io.ORDER_QUEUE_PATH", q_path)
+        # 손실만 합산: 10000 + 10000 = 20000
+        assert trade_executor._get_today_daily_loss() == 20000
+
+
+class TestSnapshotCleanup:
+    """1000개 초과 스냅샷 자동 정리."""
+
+    def test_cleanup_removes_oldest(self, tmp_path, monkeypatch):
+        from alerts import performance_snapshot
+        monkeypatch.setattr(performance_snapshot, "_SNAPSHOT_DIR", tmp_path)
+        monkeypatch.setattr(performance_snapshot, "_MAX_SNAPSHOTS", 5)  # 테스트용 작게
+        # 10개 생성 (의도적으로 5 초과)
+        for i in range(10):
+            (tmp_path / f"snapshot_2026041{i}_120000_monthly.json").write_text("{}")
+        performance_snapshot._cleanup_old_snapshots()
+        remaining = list(tmp_path.glob("snapshot_*.json"))
+        assert len(remaining) == 5
