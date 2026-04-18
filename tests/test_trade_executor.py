@@ -475,3 +475,100 @@ class TestFilterBlockStats:
         assert stats["date"] == datetime.now().strftime("%Y-%m-%d")
         # 어떤 필터 키도 없어야 함
         assert "pullback_pct" not in stats
+
+
+# ---------------------------------------------------------------------------
+# 성과 스냅샷 (MOCK 단계 손실 한도 초과 시 비교 데이터 축적)
+# ---------------------------------------------------------------------------
+
+class TestLossLimitSnapshot:
+    """MOCK에서 한도 초과 시 스냅샷 저장 / LIVE에선 저장 안 함."""
+
+    @pytest.fixture
+    def mock_notifier(self, monkeypatch):
+        """TelegramNotifier Mock."""
+        calls = []
+
+        class _Mock:
+            def send_to_users(self, users, msg):
+                calls.append((users, msg))
+
+        monkeypatch.setattr("alerts.telegram_notifier.TelegramNotifier", lambda: _Mock())
+        return calls
+
+    @pytest.fixture
+    def isolated_alert_path(self, tmp_path, monkeypatch):
+        from alerts import trade_executor
+        p = tmp_path / "loss_limit_alert.json"
+        monkeypatch.setattr(trade_executor, "_LOSS_LIMIT_ALERT_PATH", p)
+        return p
+
+    @pytest.fixture
+    def isolated_snapshot_dir(self, tmp_path, monkeypatch):
+        from alerts import performance_snapshot
+        monkeypatch.setattr(performance_snapshot, "_SNAPSHOT_DIR", tmp_path / "snapshots")
+        return tmp_path / "snapshots"
+
+    def test_mock_saves_snapshot(self, mock_notifier, isolated_alert_path, isolated_snapshot_dir, monkeypatch):
+        """MOCK 모드: 한도 초과 시 스냅샷 파일 저장."""
+        from alerts import trade_executor
+        monkeypatch.setattr(trade_executor, "OPERATION_MODE", "MOCK")
+        trade_executor._notify_loss_limit(
+            "monthly",
+            "월 한도 테스트",
+            snapshot_info={
+                "current_loss": 62000,
+                "limit_value": 60000,
+                "positions": {"229200": {"qty": 10, "buy_price": 19000}},
+            },
+        )
+        files = list(isolated_snapshot_dir.glob("snapshot_*_monthly.json"))
+        assert len(files) == 1
+        import json as _json
+        data = _json.loads(files[0].read_text(encoding="utf-8"))
+        assert data["kind"] == "monthly"
+        assert data["current_loss"] == 62000
+        assert data["limit_value"] == 60000
+        assert data["exceeded_by"] == 2000
+        assert "229200" in data["positions"]
+
+    def test_live_skips_snapshot(self, mock_notifier, isolated_alert_path, isolated_snapshot_dir, monkeypatch):
+        """LIVE 모드: snapshot_info 있어도 저장 안 함."""
+        from alerts import trade_executor
+        monkeypatch.setattr(trade_executor, "OPERATION_MODE", "LIVE")
+        trade_executor._notify_loss_limit(
+            "monthly",
+            "LIVE 한도 테스트",
+            snapshot_info={
+                "current_loss": 62000,
+                "limit_value": 60000,
+                "positions": {},
+            },
+        )
+        files = list(isolated_snapshot_dir.glob("snapshot_*.json"))
+        assert len(files) == 0
+        # 텔레그램 알림은 발송됨
+        assert len(mock_notifier) == 1
+
+    def test_no_snapshot_info_no_save(self, mock_notifier, isolated_alert_path, isolated_snapshot_dir, monkeypatch):
+        """snapshot_info=None이면 저장 안 함 (기존 호출 호환)."""
+        from alerts import trade_executor
+        monkeypatch.setattr(trade_executor, "OPERATION_MODE", "MOCK")
+        trade_executor._notify_loss_limit("monthly", "기본 호출")
+        files = list(isolated_snapshot_dir.glob("snapshot_*.json"))
+        assert len(files) == 0
+
+    def test_cooldown_also_skips_snapshot(self, mock_notifier, isolated_alert_path, isolated_snapshot_dir, monkeypatch):
+        """쿨다운 중에는 알림도 안 가고 스냅샷도 저장 안 됨."""
+        from alerts import trade_executor
+        monkeypatch.setattr(trade_executor, "OPERATION_MODE", "MOCK")
+        trade_executor._notify_loss_limit(
+            "monthly", "첫 번째",
+            snapshot_info={"current_loss": 60000, "limit_value": 60000, "positions": {}},
+        )
+        trade_executor._notify_loss_limit(
+            "monthly", "두 번째",
+            snapshot_info={"current_loss": 61000, "limit_value": 60000, "positions": {}},
+        )
+        files = list(isolated_snapshot_dir.glob("snapshot_*_monthly.json"))
+        assert len(files) == 1  # 쿨다운 때문에 하나만

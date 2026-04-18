@@ -59,10 +59,21 @@ def _write_loss_limit_alerts(data: dict) -> None:
         logger.warning("[loss_limit] 알림 파일 저장 실패: %s", e)
 
 
-def _notify_loss_limit(kind: str, message: str) -> None:
+def _notify_loss_limit(
+    kind: str,
+    message: str,
+    *,
+    snapshot_info: dict | None = None,
+) -> bool:
     """손실 한도 초과 텔레그램 알림. 같은 kind는 24h 쿨다운.
 
     kind: "monthly" | "daily" | "consec"
+    snapshot_info: MOCK 모드일 때 성과 스냅샷에 저장할 정보
+                   {current_loss, limit_value, positions} 형태
+                   None이면 스냅샷 생략 (LIVE 또는 기존 호출 호환)
+
+    Returns:
+        True = 알림 발송됨 (쿨다운 통과), False = 쿨다운 중 스킵
     """
     now = datetime.now()
     alerts = _read_loss_limit_alerts()
@@ -71,7 +82,7 @@ def _notify_loss_limit(kind: str, message: str) -> None:
         try:
             last = datetime.fromisoformat(last_str)
             if (now - last).total_seconds() < _LOSS_LIMIT_COOLDOWN_SEC:
-                return
+                return False
         except (ValueError, TypeError):
             pass
     alerts[kind] = now.isoformat()
@@ -84,6 +95,20 @@ def _notify_loss_limit(kind: str, message: str) -> None:
         )
     except Exception as e:
         logger.warning("[loss_limit] 텔레그램 알림 실패: %s", e)
+
+    # MOCK 모드에서만 성과 스냅샷 저장 (실측 비교 실험용)
+    if snapshot_info and OPERATION_MODE == "MOCK":
+        try:
+            from alerts.performance_snapshot import save_loss_limit_snapshot
+            save_loss_limit_snapshot(
+                kind=kind,
+                current_loss=snapshot_info.get("current_loss", 0),
+                limit_value=snapshot_info.get("limit_value", 0),
+                positions=snapshot_info.get("positions"),
+            )
+        except Exception as e:
+            logger.warning("[loss_limit] 스냅샷 저장 실패: %s", e)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -292,37 +317,68 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
             logger.debug("[자동매매] %s AI 미응답 → AI 없이 진행", name)
 
         # 방어 체크
+        # MOCK 단계: 한도 초과 시에도 매수 계속 진행 (스냅샷만 저장 후 실측 비교용).
+        # LIVE 단계: 기존대로 즉시 차단 (노후 자금 보호).
+        # 2026-04-17 아빠 지시 "연습 단계이니 데이터 쌓기용 — 멈춤 vs 계속 비교"
         if is_monthly_loss_exceeded():
-            logger.warning("[자동매매] 월간 손실 한도 초과 → 매수 차단")
+            logger.warning("[자동매매] 월간 손실 한도 초과 → %s",
+                           "스냅샷 기록 후 매수 계속 (MOCK)" if OPERATION_MODE == "MOCK" else "매수 차단 (LIVE)")
             _record_filter_block("monthly_loss")
+            from alerts.file_io import load_monthly_loss as _load_ml
+            from alerts.market_guard import MAX_MONTHLY_LOSS as _MAX_ML
+            _ml_state = _load_ml()
             _notify_loss_limit(
                 "monthly",
                 "🛑 [월 손실 한도 초과]\n"
-                "신규 매수 중단\n"
-                "→ 다음 달 1일 자동 재개\n"
+                f"{'MOCK — 스냅샷 저장 후 거래 계속 (비교 실험용)' if OPERATION_MODE == 'MOCK' else '신규 매수 중단 → 다음 달 1일 자동 재개'}\n"
                 "※ 기존 포지션 관리(손절/트레일링)는 계속 작동",
+                snapshot_info={
+                    "current_loss": int(_ml_state.get("loss", 0)),
+                    "limit_value": int(_MAX_ML),
+                    "positions": load_auto_positions(),
+                },
             )
-            return
+            if OPERATION_MODE != "MOCK":
+                return
+            # MOCK: 거래 계속 진행
         if is_consec_stoploss_exceeded():
-            logger.warning("[자동매매] 연속 손절 한도 초과 → 매수 차단")
+            logger.warning("[자동매매] 연속 손절 한도 초과 → %s",
+                           "스냅샷 기록 후 매수 계속 (MOCK)" if OPERATION_MODE == "MOCK" else "매수 차단 (LIVE)")
             _record_filter_block("consec_stoploss")
+            from alerts.file_io import load_monthly_loss as _load_ml2
+            from alerts.market_guard import MAX_CONSEC_STOPLOSS as _MAX_CS
+            _ml_state2 = _load_ml2()
             _notify_loss_limit(
                 "consec",
                 "⚠️ [연속 손절 한도 초과]\n"
-                "신규 매수 일시 중단\n"
-                "→ 익절 1회 발생 시 자동 재개",
+                f"{'MOCK — 스냅샷 저장 후 거래 계속 (비교 실험용)' if OPERATION_MODE == 'MOCK' else '신규 매수 일시 중단 → 익절 1회 발생 시 자동 재개'}",
+                snapshot_info={
+                    "current_loss": int(_ml_state2.get("consec_stoploss", 0)),  # 횟수
+                    "limit_value": int(_MAX_CS),
+                    "positions": load_auto_positions(),
+                },
             )
-            return
+            if OPERATION_MODE != "MOCK":
+                return
+            # MOCK: 거래 계속 진행
         if is_daily_loss_exceeded():
-            logger.warning("[자동매매] 일일 손실 한도 초과 → 매수 차단")
+            logger.warning("[자동매매] 일일 손실 한도 초과 → %s",
+                           "스냅샷 기록 후 매수 계속 (MOCK)" if OPERATION_MODE == "MOCK" else "매수 차단 (LIVE)")
             _record_filter_block("daily_loss")
+            from alerts.market_guard import MAX_DAILY_LOSS as _MAX_DL
             _notify_loss_limit(
                 "daily",
                 "⏸️ [당일 손실 한도 초과]\n"
-                "오늘만 신규 매수 중단\n"
-                "→ 내일 09:00 자동 재개",
+                f"{'MOCK — 스냅샷 저장 후 거래 계속 (비교 실험용)' if OPERATION_MODE == 'MOCK' else '오늘만 신규 매수 중단 → 내일 09:00 자동 재개'}",
+                snapshot_info={
+                    "current_loss": 0,  # 일일 손실은 order_queue에서 집계되므로 정확치 생략
+                    "limit_value": int(_MAX_DL),
+                    "positions": load_auto_positions(),
+                },
             )
-            return
+            if OPERATION_MODE != "MOCK":
+                return
+            # MOCK: 거래 계속 진행
 
         # 중복 체크 (manual 포지션은 자동매매 대상 아님)
         positions = load_auto_positions()
