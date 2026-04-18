@@ -414,3 +414,64 @@ class TestLossLimitAlert:
         )
         _notify_loss_limit("monthly", "재발송")
         assert len(mock_notifier) == 1
+
+
+# ---------------------------------------------------------------------------
+# 필터 차단 통계 (옵션 B — 병목 계측)
+# ---------------------------------------------------------------------------
+
+class TestFilterBlockStats:
+    """매수 차단 필터별 카운터 + 날짜 자동 리셋."""
+
+    @pytest.fixture
+    def isolated_stats_path(self, tmp_path, monkeypatch):
+        from alerts import trade_executor
+        p = tmp_path / "filter_block_stats.json"
+        monkeypatch.setattr(trade_executor, "_FILTER_STATS_PATH", p)
+        return p
+
+    def test_first_block_records_one(self, isolated_stats_path):
+        from alerts.trade_executor import _record_filter_block, get_filter_block_stats_today
+        _record_filter_block("pullback_pct")
+        stats = get_filter_block_stats_today()
+        assert stats.get("pullback_pct") == 1
+
+    def test_repeated_blocks_accumulate(self, isolated_stats_path):
+        from alerts.trade_executor import _record_filter_block, get_filter_block_stats_today
+        for _ in range(5):
+            _record_filter_block("daily_roundtrips")
+        stats = get_filter_block_stats_today()
+        assert stats["daily_roundtrips"] == 5
+
+    def test_different_filters_independent(self, isolated_stats_path):
+        from alerts.trade_executor import _record_filter_block, get_filter_block_stats_today
+        _record_filter_block("pullback_pct")
+        _record_filter_block("pullback_pct")
+        _record_filter_block("ai_sell")
+        _record_filter_block("time_filter")
+        stats = get_filter_block_stats_today()
+        assert stats["pullback_pct"] == 2
+        assert stats["ai_sell"] == 1
+        assert stats["time_filter"] == 1
+
+    def test_date_change_resets(self, isolated_stats_path, monkeypatch):
+        """날짜가 바뀌면 카운터 자동 리셋."""
+        import json as _json
+        from alerts.trade_executor import _record_filter_block, get_filter_block_stats_today
+        # 어제 데이터 쓰기
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        isolated_stats_path.parent.mkdir(parents=True, exist_ok=True)
+        isolated_stats_path.write_text(
+            _json.dumps({"date": yesterday, "pullback_pct": 99}), encoding="utf-8"
+        )
+        _record_filter_block("pullback_pct")
+        stats = get_filter_block_stats_today()
+        assert stats.get("pullback_pct") == 1  # 99 → 1 (리셋됨)
+        assert stats["date"] == datetime.now().strftime("%Y-%m-%d")
+
+    def test_get_today_empty_if_no_data(self, isolated_stats_path):
+        from alerts.trade_executor import get_filter_block_stats_today
+        stats = get_filter_block_stats_today()
+        assert stats["date"] == datetime.now().strftime("%Y-%m-%d")
+        # 어떤 필터 키도 없어야 함
+        assert "pullback_pct" not in stats

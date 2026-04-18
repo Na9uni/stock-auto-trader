@@ -87,6 +87,59 @@ def _notify_loss_limit(kind: str, message: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 필터 차단 통계 (옵션 B — 병목 계측)
+# ---------------------------------------------------------------------------
+# 목적: MOCK 운영 중 "어느 필터가 몇 번 매수를 막았나" 일별 집계.
+# 활용: 2주+ 데이터 축적 후 하드 필터 → 가중치 전환 검토 근거.
+# 계측 대상 (BUY 신호 차단 지점만):
+#   whitelist, time_filter, market_crash, ai_sell,
+#   monthly_loss, daily_loss, consec_stoploss,
+#   daily_roundtrips, pullback_pct, slot_full
+
+_FILTER_STATS_PATH = Path(__file__).parent.parent / "data" / "filter_block_stats.json"
+
+
+def _read_filter_stats() -> dict:
+    try:
+        if not _FILTER_STATS_PATH.exists():
+            return {}
+        with open(_FILTER_STATS_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _write_filter_stats(data: dict) -> None:
+    try:
+        _FILTER_STATS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _FILTER_STATS_PATH.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        tmp.replace(_FILTER_STATS_PATH)
+    except Exception as e:
+        logger.warning("[filter_stats] 저장 실패: %s", e)
+
+
+def _record_filter_block(filter_name: str) -> None:
+    """필터가 매수를 1회 차단했음을 기록. 날짜 바뀌면 자동 리셋."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    stats = _read_filter_stats()
+    if stats.get("date") != today:
+        stats = {"date": today}
+    stats[filter_name] = int(stats.get(filter_name, 0)) + 1
+    _write_filter_stats(stats)
+
+
+def get_filter_block_stats_today() -> dict:
+    """오늘자 필터 차단 통계 조회. daily_report/heartbeat에서 사용."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    stats = _read_filter_stats()
+    if stats.get("date") != today:
+        return {"date": today}
+    return stats
+
+
+# ---------------------------------------------------------------------------
 # 설정 (analysis_scheduler에서 주입)
 # ---------------------------------------------------------------------------
 
@@ -212,15 +265,18 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
     # 장 시작 N분 이내 매수 차단 (매도는 허용)
     if now.hour == 9 and now.minute < buy_start and signal.signal_type == SignalType.BUY:
         logger.debug("[시간 제한] 장 시작 %d분 이내 — 매수 보류", buy_start)
+        _record_filter_block("time_filter")
         return
     # buy_end_hour 이후 신규 매수 차단 (매도는 허용)
     if now.hour >= buy_end and signal.signal_type == SignalType.BUY:
         logger.debug("[시간 제한] %d시 이후 — 신규 매수 차단", buy_end)
+        _record_filter_block("time_filter")
         return
 
     # ── 서킷브레이커/급락 대응 ──
     if signal.signal_type == SignalType.BUY and _is_market_crash():
         logger.debug("[자동매매] %s 차단: 시장 급락 감지", name)
+        _record_filter_block("market_crash")
         return
 
     # ── 매수 ──
@@ -228,6 +284,7 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
         # AI 판단: "매도"이면 차단, 실패/빈값은 경고 후 진행
         if ai_decision == "매도":
             logger.info("[자동매매] %s AI 판단=매도 → 매수 차단", name)
+            _record_filter_block("ai_sell")
             return
         if ai_decision and ai_decision != "매수":
             logger.info("[자동매매] %s AI 판단=%s → 경고 후 진행", name, ai_decision)
@@ -237,6 +294,7 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
         # 방어 체크
         if is_monthly_loss_exceeded():
             logger.warning("[자동매매] 월간 손실 한도 초과 → 매수 차단")
+            _record_filter_block("monthly_loss")
             _notify_loss_limit(
                 "monthly",
                 "🛑 [월 손실 한도 초과]\n"
@@ -247,6 +305,7 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
             return
         if is_consec_stoploss_exceeded():
             logger.warning("[자동매매] 연속 손절 한도 초과 → 매수 차단")
+            _record_filter_block("consec_stoploss")
             _notify_loss_limit(
                 "consec",
                 "⚠️ [연속 손절 한도 초과]\n"
@@ -256,6 +315,7 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
             return
         if is_daily_loss_exceeded():
             logger.warning("[자동매매] 일일 손실 한도 초과 → 매수 차단")
+            _record_filter_block("daily_loss")
             _notify_loss_limit(
                 "daily",
                 "⏸️ [당일 손실 한도 초과]\n"
@@ -270,23 +330,28 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
         if ticker in auto_positions or ticker in _buy_in_progress:
             if ticker in auto_positions and auto_positions[ticker].get("selling"):
                 logger.debug("[자동매매] %s 차단: 매도 진행 중", name)
+                _record_filter_block("already_holding")
                 return
             if ticker in auto_positions:
                 logger.debug("[자동매매] %s 차단: 이미 보유 중", name)
+                _record_filter_block("already_holding")
                 return
             if ticker in _buy_in_progress:
                 logger.debug("[자동매매] %s 차단: 매수 접수 진행 중", name)
+                _record_filter_block("already_holding")
                 return
 
         # 필터 체크
         filtered, reason = is_ticker_filtered(ticker)
         if filtered:
             logger.info("[자동매매] %s 필터 제외: %s", name, reason)
+            _record_filter_block("whitelist")
             return
 
         # 하루 동일 종목 매매 횟수 제한 — 데이트레이딩 재진입 무한루프 방지
         from alerts.market_guard import daily_buy_count_ok
         if not daily_buy_count_ok(ticker):
+            _record_filter_block("daily_roundtrips")
             return
 
         # 저점 매수 필터 — 당일 고가 대비 N% 이상 눌렸을 때만 매수 (추격매수 방지)
@@ -321,11 +386,13 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
                     name, f"{current_price_now:,}", f"{day_high:,}", pullback, PULLBACK_PCT,
                     strategy_name or "?", underlying or "?",
                 )
+                _record_filter_block("pullback_pct")
                 return
 
         # 금액 계산
         amount = _calc_trade_amount()
         if amount <= 0:
+            _record_filter_block("no_budget")
             return
 
         price = current_price_now
