@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 from datetime import datetime
@@ -42,26 +43,46 @@ _LOSS_LIMIT_ALERT_PATH = Path(__file__).parent.parent / "data" / "loss_limit_ale
 
 
 def _compute_cycle_id(kind: str) -> str:
-    """한도 사이클 식별자. 같은 id면 같은 다운 이벤트로 간주하여 스냅샷 스킵."""
+    """한도 사이클 식별자 (monthly/daily 순수 함수).
+
+    monthly/daily: 월/일 문자열 기반, 날짜 바뀌면 자동으로 새 사이클.
+    consec: **이 함수 아닌 `_notify_loss_limit` 내부에서 카운터 기반으로 생성**.
+            고정 문자열 쓰면 리셋→재발→리셋→재발 반복 시 같은 ID로 스냅샷 누락.
+    """
     now = datetime.now()
     if kind == "monthly":
         return f"m-{now.strftime('%Y-%m')}"
     if kind == "daily":
         return f"d-{now.strftime('%Y-%m-%d')}"
-    if kind == "consec":
-        # 리셋될 때까지 같은 사이클. `_read_loss_limit_alerts`에서 자동 clear.
-        return "c-triggered"
+    # consec은 caller(_notify_loss_limit)가 카운터 기반으로 처리
     return f"{kind}-unknown"
 
 
 def _read_loss_limit_alerts() -> dict:
+    """loss_limit_alert.json 읽기. 운영모드 전환 감지 시 자동 리셋.
+
+    MOCK→LIVE 전환 시 이전 MOCK 사이클 ID가 남아있으면 LIVE 첫 한도
+    히트 시 알림 침묵 발생. 이를 방지하기 위해 mode 필드로 감지 후
+    전체 리셋.
+    """
     try:
         if not _LOSS_LIMIT_ALERT_PATH.exists():
-            return {}
+            return {"_mode": OPERATION_MODE}
         with open(_LOSS_LIMIT_ALERT_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
     except Exception:
-        return {}
+        return {"_mode": OPERATION_MODE}
+
+    stored_mode = data.get("_mode")
+    if stored_mode and stored_mode != OPERATION_MODE:
+        logger.warning(
+            "[loss_limit] 운영모드 전환 감지 %s → %s. 이전 사이클 ID 전체 리셋.",
+            stored_mode, OPERATION_MODE,
+        )
+        return {"_mode": OPERATION_MODE}
+    if not stored_mode:
+        data["_mode"] = OPERATION_MODE
+    return data
 
 
 def _write_loss_limit_alerts(data: dict) -> None:
@@ -98,17 +119,30 @@ def _notify_loss_limit(
     alerts = _read_loss_limit_alerts()
 
     # consec 리셋 감지: 카운터가 한도 밑으로 내려갔으면 사이클 ID clear
+    # 가드: _MCS=0이면 market_guard._configure() 미호출 상태 → 리셋 판정 보류
     if alerts.get("consec_cycle_id"):
         try:
             from alerts.file_io import load_monthly_loss as _lml
             from alerts.market_guard import MAX_CONSEC_STOPLOSS as _MCS
-            if _lml().get("consec_stoploss", 0) < _MCS:
+            if _MCS > 0 and _lml().get("consec_stoploss", 0) < _MCS:
                 del alerts["consec_cycle_id"]
         except Exception:
             pass
 
-    # 현재 사이클 ID vs 마지막 기록
-    current_cycle = _compute_cycle_id(kind)
+    # 현재 사이클 ID 계산
+    if kind == "consec":
+        # consec: 기존 활성 사이클 있으면 재사용 (스킵됨), 없으면 카운터 증가하여 신규 ID
+        # 이유: "c-triggered" 고정 문자열로 하면 리셋→재발 반복 시 같은 ID라서 2회차부터 누락됨.
+        existing = alerts.get("consec_cycle_id")
+        if existing:
+            current_cycle = existing
+        else:
+            next_count = int(alerts.get("consec_trigger_count", 0)) + 1
+            current_cycle = f"c-{next_count}"
+            alerts["consec_trigger_count"] = next_count
+    else:
+        current_cycle = _compute_cycle_id(kind)
+
     last_cycle = alerts.get(f"{kind}_cycle_id")
     if last_cycle == current_cycle:
         return False  # 같은 다운 이벤트 — 스냅샷/알림 스킵
@@ -182,6 +216,63 @@ def _record_filter_block(filter_name: str) -> None:
         stats = {"date": today}
     stats[filter_name] = int(stats.get(filter_name, 0)) + 1
     _write_filter_stats(stats)
+
+
+def cleanup_stale_buy_in_progress(max_age_sec: int = 300) -> None:
+    """크래시 복구 + stale 주문 정리.
+
+    - order_queue의 pending 매수 주문 중 _buy_in_progress에 없는 것 → 복구
+    - _buy_in_progress에 있으나 order_queue에 pending 아님 또는 max_age_sec 초과 → 제거
+
+    시스템 시작 시 1회 + 주기적 호출 권장 (analysis_scheduler에서).
+    """
+    from alerts.file_io import ORDER_QUEUE_PATH
+    try:
+        if not ORDER_QUEUE_PATH.exists():
+            return
+        with open(ORDER_QUEUE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        orders = data.get("orders", [])
+        now = datetime.now()
+
+        active_pending = set()
+        stale_tickers = set()
+        all_buy_tickers = set()
+        for o in orders:
+            if not isinstance(o, dict) or o.get("side") != "buy":
+                continue
+            ticker = o.get("ticker", "")
+            if not ticker:
+                continue
+            all_buy_tickers.add(ticker)
+            if o.get("status") != "pending":
+                continue
+            submitted = o.get("submitted_at", "")
+            try:
+                submit_dt = datetime.fromisoformat(submitted)
+                age_sec = (now - submit_dt).total_seconds()
+                if age_sec > max_age_sec:
+                    stale_tickers.add(ticker)
+                else:
+                    active_pending.add(ticker)
+            except (ValueError, TypeError):
+                # submitted_at 파싱 실패 시 stale로 취급 (안전)
+                stale_tickers.add(ticker)
+
+        # 크래시 복구: pending인데 _buy_in_progress 없음 → 복구
+        for ticker in active_pending - _buy_in_progress:
+            _buy_in_progress.add(ticker)
+            logger.info("[buy_in_progress] %s 재시작 복구 (pending 주문 존재)", ticker)
+
+        # 정리 대상: stale + orphan (order_queue에 아예 매수 이력 없음)
+        orphan = _buy_in_progress - all_buy_tickers
+        for ticker in orphan | stale_tickers:
+            if ticker in _buy_in_progress:
+                _buy_in_progress.discard(ticker)
+                reason = "stale >5min" if ticker in stale_tickers else "orphan (no queue entry)"
+                logger.warning("[buy_in_progress] %s 정리: %s", ticker, reason)
+    except Exception as e:
+        logger.warning("[buy_in_progress] cleanup 실패: %s", e)
 
 
 def _get_today_daily_loss() -> int:
@@ -403,7 +494,7 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
                 snapshot_info={
                     "current_loss": int(_ml_state.get("loss", 0)),
                     "limit_value": int(_MAX_ML),
-                    "positions": load_auto_positions(),
+                    "positions": copy.deepcopy(load_auto_positions()),
                 },
             )
             if OPERATION_MODE != "MOCK":
@@ -423,25 +514,28 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
                 snapshot_info={
                     "current_loss": int(_ml_state2.get("consec_stoploss", 0)),  # 횟수
                     "limit_value": int(_MAX_CS),
-                    "positions": load_auto_positions(),
+                    "positions": copy.deepcopy(load_auto_positions()),
                 },
             )
             if OPERATION_MODE != "MOCK":
                 return
             # MOCK: 거래 계속 진행 (데이터 수집용)
-        if is_daily_loss_exceeded():
-            logger.warning("[자동매매] 일일 손실 한도 초과 → 매수 차단")
+        # 일일 손실은 order_queue.json 1회 읽기로 판정 + 스냅샷 값 동시 확보 (race 방지)
+        from alerts.market_guard import MAX_DAILY_LOSS as _MAX_DL
+        _daily_loss_now = _get_today_daily_loss()
+        if _MAX_DL > 0 and _daily_loss_now >= _MAX_DL:
+            logger.warning("[자동매매] 당일 손실 한도 초과: %d / %d → 매수 차단",
+                           _daily_loss_now, _MAX_DL)
             _record_filter_block("daily_loss")
-            from alerts.market_guard import MAX_DAILY_LOSS as _MAX_DL
             _notify_loss_limit(
                 "daily",
                 "⏸️ [당일 손실 한도 초과]\n"
                 "오늘만 신규 매수 중단\n"
                 "→ 내일 09:00 자동 재개",
                 snapshot_info={
-                    "current_loss": _get_today_daily_loss(),
+                    "current_loss": _daily_loss_now,
                     "limit_value": int(_MAX_DL),
-                    "positions": load_auto_positions(),
+                    "positions": copy.deepcopy(load_auto_positions()),
                 },
             )
             if OPERATION_MODE != "MOCK":

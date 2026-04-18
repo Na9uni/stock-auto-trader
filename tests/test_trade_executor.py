@@ -598,36 +598,206 @@ class TestCycleReset:
         return p
 
     def test_consec_reset_allows_retrigger(self, mock_notifier, isolated_alert_path, monkeypatch):
-        """consec 카운터가 0으로 리셋되면 다음 초과 시 재트리거."""
+        """consec 카운터가 0으로 리셋되면 다음 초과 시 재트리거 (새 cycle_id 생성)."""
         import json as _json
         from alerts import trade_executor, market_guard
         monkeypatch.setattr(market_guard, "MAX_CONSEC_STOPLOSS", 2)
-        # 1차 트리거 상태로 설정
+        # 1차 트리거 상태로 설정 (c-1)
         isolated_alert_path.parent.mkdir(parents=True, exist_ok=True)
         isolated_alert_path.write_text(
-            _json.dumps({"consec_cycle_id": "c-triggered"}), encoding="utf-8"
+            _json.dumps({"consec_cycle_id": "c-1", "consec_trigger_count": 1,
+                         "_mode": "MOCK"}), encoding="utf-8"
         )
         # 카운터 0 (리셋됨) 시뮬
+        monkeypatch.setattr(trade_executor, "OPERATION_MODE", "MOCK")
         monkeypatch.setattr("alerts.file_io.load_monthly_loss", lambda: {"consec_stoploss": 0})
-        # 이제 다시 알림 호출하면 cycle clear 된 상태 → 트리거 가능
+        # 이제 다시 알림 호출하면 cycle clear + 카운터 증가 → c-2
         result = trade_executor._notify_loss_limit("consec", "리셋 후 재트리거")
-        assert result is True  # 새 사이클
+        assert result is True
         assert len(mock_notifier) == 1
+        # 파일에 c-2가 기록됐는지
+        data = _json.loads(isolated_alert_path.read_text(encoding="utf-8"))
+        assert data["consec_cycle_id"] == "c-2"
+        assert data["consec_trigger_count"] == 2
 
     def test_consec_still_exceeded_stays_silent(self, mock_notifier, isolated_alert_path, monkeypatch):
         """consec 카운터가 여전히 한도 이상이면 같은 사이클 — 스킵."""
         import json as _json
         from alerts import trade_executor, market_guard
         monkeypatch.setattr(market_guard, "MAX_CONSEC_STOPLOSS", 2)
+        monkeypatch.setattr(trade_executor, "OPERATION_MODE", "MOCK")
         isolated_alert_path.parent.mkdir(parents=True, exist_ok=True)
         isolated_alert_path.write_text(
-            _json.dumps({"consec_cycle_id": "c-triggered"}), encoding="utf-8"
+            _json.dumps({"consec_cycle_id": "c-1", "consec_trigger_count": 1,
+                         "_mode": "MOCK"}), encoding="utf-8"
         )
         # 카운터 3 (여전히 초과)
         monkeypatch.setattr("alerts.file_io.load_monthly_loss", lambda: {"consec_stoploss": 3})
         result = trade_executor._notify_loss_limit("consec", "추가 호출")
         assert result is False  # 같은 사이클
         assert len(mock_notifier) == 0
+
+    def test_mcs_zero_guards_against_false_reset(self, mock_notifier, isolated_alert_path, monkeypatch):
+        """Critical #1: MAX_CONSEC_STOPLOSS=0일 때 잘못된 리셋 방지 가드."""
+        import json as _json
+        from alerts import trade_executor, market_guard
+        # _MCS=0 상태 (module 로드 직후)
+        monkeypatch.setattr(market_guard, "MAX_CONSEC_STOPLOSS", 0)
+        monkeypatch.setattr(trade_executor, "OPERATION_MODE", "MOCK")
+        isolated_alert_path.parent.mkdir(parents=True, exist_ok=True)
+        isolated_alert_path.write_text(
+            _json.dumps({"consec_cycle_id": "c-1", "consec_trigger_count": 1,
+                         "_mode": "MOCK"}), encoding="utf-8"
+        )
+        # count=0이고 _MCS=0일 때 "0 < 0 = False"라 리셋 안 돼야 정상 (가드 있음)
+        monkeypatch.setattr("alerts.file_io.load_monthly_loss", lambda: {"consec_stoploss": 0})
+        # 호출 시 기존 cycle_id 유지 → 같은 사이클 → 스킵
+        result = trade_executor._notify_loss_limit("consec", "가드 확인")
+        # 가드가 없었다면 리셋되어 c-2 신규 트리거됐을 것. 가드 덕에 스킵.
+        data = _json.loads(isolated_alert_path.read_text(encoding="utf-8"))
+        assert data.get("consec_cycle_id") == "c-1"  # 유지
+        assert result is False  # 스킵
+
+
+class TestModeTransition:
+    """Critical #3: MOCK→LIVE 전환 시 loss_limit_alert.json 자동 리셋."""
+
+    @pytest.fixture
+    def isolated_alert_path(self, tmp_path, monkeypatch):
+        from alerts import trade_executor
+        p = tmp_path / "loss_limit_alert.json"
+        monkeypatch.setattr(trade_executor, "_LOSS_LIMIT_ALERT_PATH", p)
+        return p
+
+    def test_mock_to_live_resets_alerts(self, isolated_alert_path, monkeypatch):
+        """MOCK에서 기록된 cycle_id가 LIVE 전환 시 자동 리셋."""
+        import json as _json
+        from alerts import trade_executor
+        # MOCK 상태로 저장된 파일
+        isolated_alert_path.parent.mkdir(parents=True, exist_ok=True)
+        isolated_alert_path.write_text(
+            _json.dumps({
+                "_mode": "MOCK",
+                "monthly_cycle_id": "m-2026-04",
+                "daily_cycle_id": "d-2026-04-17",
+                "consec_cycle_id": "c-5",
+            }), encoding="utf-8"
+        )
+        # LIVE 전환
+        monkeypatch.setattr(trade_executor, "OPERATION_MODE", "LIVE")
+        alerts = trade_executor._read_loss_limit_alerts()
+        # 모드 불일치 감지 → 전체 리셋
+        assert alerts == {"_mode": "LIVE"}
+        assert "monthly_cycle_id" not in alerts
+
+    def test_same_mode_keeps_state(self, isolated_alert_path, monkeypatch):
+        """동일 모드면 상태 유지."""
+        import json as _json
+        from alerts import trade_executor
+        isolated_alert_path.parent.mkdir(parents=True, exist_ok=True)
+        isolated_alert_path.write_text(
+            _json.dumps({
+                "_mode": "MOCK",
+                "monthly_cycle_id": "m-2026-04",
+            }), encoding="utf-8"
+        )
+        monkeypatch.setattr(trade_executor, "OPERATION_MODE", "MOCK")
+        alerts = trade_executor._read_loss_limit_alerts()
+        assert alerts.get("monthly_cycle_id") == "m-2026-04"
+
+
+class TestSnapshotModeGuard:
+    """신규 #4: LIVE 모드에서 save_loss_limit_snapshot 호출 시 저장 거부."""
+
+    def test_live_mode_refuses_save(self, tmp_path, monkeypatch):
+        from alerts import performance_snapshot
+        monkeypatch.setattr(performance_snapshot, "_SNAPSHOT_DIR", tmp_path)
+        result = performance_snapshot.save_loss_limit_snapshot(
+            "monthly", current_loss=60000, limit_value=60000,
+            positions={}, mode="LIVE",
+        )
+        assert result is None  # 저장 거부
+        files = list(tmp_path.glob("snapshot_*.json"))
+        assert len(files) == 0
+
+    def test_mock_mode_saves(self, tmp_path, monkeypatch):
+        from alerts import performance_snapshot
+        monkeypatch.setattr(performance_snapshot, "_SNAPSHOT_DIR", tmp_path)
+        result = performance_snapshot.save_loss_limit_snapshot(
+            "monthly", current_loss=60000, limit_value=60000,
+            positions={}, mode="MOCK",
+        )
+        assert result is not None
+        assert result.exists()
+
+
+class TestTokenMasking:
+    """Major #10: 텔레그램 토큰 로그 마스킹."""
+
+    def test_mask_url_with_token(self):
+        from alerts.telegram_notifier import mask_bot_token
+        url = "https://api.telegram.org/bot1234567:AbcDefGhi123-xyz/sendMessage"
+        masked = mask_bot_token(url)
+        assert "1234567:AbcDefGhi123-xyz" not in masked
+        assert "bot***MASKED***" in masked
+
+    def test_mask_exception_message(self):
+        from alerts.telegram_notifier import mask_bot_token
+        exc_msg = "HTTPSConnectionPool: url https://api.telegram.org/bot9999:SECRET/getUpdates failed"
+        masked = mask_bot_token(exc_msg)
+        assert "SECRET" not in masked
+        assert "9999" not in masked
+
+
+class TestBuyInProgressCleanup:
+    """Critical #4: cleanup_stale_buy_in_progress 동작."""
+
+    @pytest.fixture
+    def isolated_queue(self, tmp_path, monkeypatch):
+        from alerts import trade_executor
+        q = tmp_path / "order_queue.json"
+        monkeypatch.setattr("alerts.file_io.ORDER_QUEUE_PATH", q)
+        # _buy_in_progress 초기화
+        trade_executor._buy_in_progress.clear()
+        return q
+
+    def test_restores_pending_ticker(self, isolated_queue, monkeypatch):
+        """재시작 후 pending 주문이 있으면 _buy_in_progress에 복구."""
+        import json as _json
+        from alerts import trade_executor
+        now_iso = datetime.now().isoformat()
+        isolated_queue.write_text(_json.dumps({
+            "orders": [
+                {"ticker": "005930", "side": "buy", "status": "pending",
+                 "submitted_at": now_iso},
+            ]
+        }), encoding="utf-8")
+        trade_executor.cleanup_stale_buy_in_progress()
+        assert "005930" in trade_executor._buy_in_progress
+
+    def test_removes_stale_ticker(self, isolated_queue, monkeypatch):
+        """5분 이상 오래된 pending은 _buy_in_progress에서 제거."""
+        import json as _json
+        from alerts import trade_executor
+        old_iso = (datetime.now() - timedelta(minutes=10)).isoformat()
+        isolated_queue.write_text(_json.dumps({
+            "orders": [
+                {"ticker": "005930", "side": "buy", "status": "pending",
+                 "submitted_at": old_iso},
+            ]
+        }), encoding="utf-8")
+        trade_executor._buy_in_progress.add("005930")
+        trade_executor.cleanup_stale_buy_in_progress(max_age_sec=300)
+        assert "005930" not in trade_executor._buy_in_progress
+
+    def test_removes_orphan(self, isolated_queue, monkeypatch):
+        """order_queue에 아예 없는 ticker도 정리."""
+        import json as _json
+        from alerts import trade_executor
+        isolated_queue.write_text(_json.dumps({"orders": []}), encoding="utf-8")
+        trade_executor._buy_in_progress.add("999999")
+        trade_executor.cleanup_stale_buy_in_progress()
+        assert "999999" not in trade_executor._buy_in_progress
 
 
 class TestDailyLossCalc:

@@ -12,6 +12,8 @@ from typing import Any
 import requests
 from dotenv import load_dotenv
 
+from alerts.telegram_notifier import mask_bot_token
+
 ROOT = Path(__file__).parent.parent
 load_dotenv(ROOT / ".env")
 logger = logging.getLogger("stock_analysis")
@@ -83,7 +85,7 @@ def _polling_loop() -> None:
                 offset = update_id + 1
                 _process_update(update)
         except Exception as exc:
-            logger.error("polling_loop 예외: %s", exc)
+            logger.error("polling_loop 예외: %s", mask_bot_token(exc))
             time.sleep(_POLLING_INTERVAL * 5)
         else:
             time.sleep(_POLLING_INTERVAL)
@@ -123,7 +125,7 @@ def _get_updates(offset: int | None) -> list[dict]:
             time.sleep(30)
     except requests.RequestException as exc:
         if _last_error_code != -1:
-            logger.error("getUpdates 예외: %s", exc)
+            logger.error("getUpdates 예외: %s", mask_bot_token(exc))
             _last_error_code = -1
     return []
 
@@ -488,7 +490,7 @@ def _send(chat_id: str, text: str) -> bool:
         logger.error("_send 실패 chat_id=%s status=%s", chat_id, resp.status_code)
         return False
     except requests.RequestException as exc:
-        logger.error("_send 예외 chat_id=%s error=%s", chat_id, exc)
+        logger.error("_send 예외 chat_id=%s error=%s", chat_id, mask_bot_token(exc))
         return False
 
 

@@ -436,7 +436,9 @@ def check_auto_positions() -> None:
                 df_ind = calc_indicators(df)
                 if df_ind is not None:
                     if "rsi" in df_ind.columns:
-                        rsi = float(df_ind.iloc[-1]["rsi"])
+                        _rsi_val = df_ind.iloc[-1]["rsi"]
+                        if not pd.isna(_rsi_val):
+                            rsi = float(_rsi_val)
                     if "atr" in df_ind.columns:
                         _atr_val = df_ind.iloc[-1]["atr"]
                         if not pd.isna(_atr_val):

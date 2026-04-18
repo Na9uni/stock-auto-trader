@@ -51,6 +51,7 @@ def save_loss_limit_snapshot(
     limit_value: int,
     positions: dict | None = None,
     extra: dict | None = None,
+    mode: str | None = None,
 ) -> Path | None:
     """손실 한도 초과 시점의 성과 스냅샷 저장.
 
@@ -60,10 +61,28 @@ def save_loss_limit_snapshot(
         limit_value: 한도 값 (원)
         positions: 현재 보유 포지션 (auto_positions.json 내용 등)
         extra: 추가 필드 (선택)
+        mode: 운영 모드 명시 ("MOCK"/"LIVE"/기타). None이면 trade_executor.OPERATION_MODE 조회.
+              LIVE 모드로 호출되면 **저장 거부** (실수 방지 안전장치).
 
     Returns:
         저장된 파일 Path, 실패 시 None
     """
+    # mode 미지정 시 자동 조회 (순환 import 우려로 지연 import)
+    if mode is None:
+        try:
+            from alerts.trade_executor import OPERATION_MODE as _OM
+            mode = _OM
+        except Exception:
+            mode = "UNKNOWN"
+
+    # LIVE 안전장치: 실수로 호출돼도 저장 거부 (비교 데이터 오염 방지)
+    if mode == "LIVE":
+        logger.warning(
+            "[스냅샷] LIVE 모드에서 save_loss_limit_snapshot 호출됨 — 저장 거부. "
+            "LIVE에서는 trade_executor가 차단하므로 이 경로 도달 자체가 버그."
+        )
+        return None
+
     try:
         _SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
         now = datetime.now()
@@ -73,7 +92,7 @@ def save_loss_limit_snapshot(
         data = {
             "timestamp": now.isoformat(),
             "kind": kind,
-            "mode": "MOCK",  # 호출은 MOCK에서만 (LIVE는 trade_executor에서 차단)
+            "mode": mode,
             "current_loss": int(current_loss),
             "limit_value": int(limit_value),
             "exceeded_by": int(current_loss) - int(limit_value),

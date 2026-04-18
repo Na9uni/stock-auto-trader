@@ -168,6 +168,8 @@ _te._configure(
     buy_start_minute=_TRADING_CONFIG.buy_start_minute,
     buy_end_hour=_TRADING_CONFIG.buy_end_hour,
 )
+# 크래시 후 재시작 시 _buy_in_progress 복구 + stale 주문 정리
+_te.cleanup_stale_buy_in_progress()
 
 from alerts import position_manager as _pm
 _pm._configure(STOPLOSS_PCT, TRAILING_ACTIVATE_PCT, TRAILING_STOP_PCT)
@@ -230,6 +232,8 @@ def run_scheduler() -> None:
     schedule.every(1).minutes.do(check_order_status)
     schedule.every(1).minutes.do(check_interest_spikes)
     schedule.every(1).minutes.do(check_auto_positions)
+    # _buy_in_progress stale 정리 (크래시 방어 + 중복 주문 방지)
+    schedule.every(5).minutes.do(_te.cleanup_stale_buy_in_progress)
     schedule.every().day.at("15:20").do(check_eod_liquidation)
     schedule.every().day.at("15:25").do(check_eod_liquidation)  # 재시도
     schedule.every().day.at("08:30").do(send_premarket_news)

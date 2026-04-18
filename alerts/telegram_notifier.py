@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 
 import requests
@@ -13,6 +14,17 @@ load_dotenv(ROOT / ".env")
 logger = logging.getLogger("stock_analysis")
 
 _MAX_MSG_LEN = 4096
+
+# Telegram bot token 패턴 (숫자:영숫자_-) — 로그 유출 방지용 마스킹
+_BOT_TOKEN_RE = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
+
+
+def mask_bot_token(text) -> str:
+    """URL/메시지/예외 문자열에 포함된 bot token 마스킹.
+
+    requests 예외, HTTP 응답 바디 등 외부 소스에서 URL이 노출될 때 토큰 보호.
+    """
+    return _BOT_TOKEN_RE.sub("bot***MASKED***", str(text))
 
 
 class TelegramNotifier:
@@ -95,7 +107,7 @@ class TelegramNotifier:
                     return True, resp.status_code, ""
                 return False, resp.status_code, resp.text[:200]
             except requests.RequestException as exc:
-                return False, 0, str(exc)
+                return False, 0, mask_bot_token(exc)
 
         # 1차: HTML 모드
         ok, status, body = _try(use_html=True)
@@ -116,7 +128,7 @@ class TelegramNotifier:
 
         logger.error(
             "텔레그램 발송 실패 chat_id=%s status=%s body=%s (attempt=1)",
-            chat_id, status, body,
+            chat_id, status, mask_bot_token(body),
         )
 
         # 3차: 3초 대기 후 plain text로 재시도 (네트워크 일시 오류 대비)
