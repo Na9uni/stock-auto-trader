@@ -91,6 +91,17 @@
         ]
       }
     ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'echo \"[세션 시작 환경 점검]\" >&2; if [ ! -f .env ]; then echo \"⚠️  .env 파일 없음 — 키움 API/텔레그램 동작 불가\" >&2; fi; if [ -f data/macro_override.json ]; then python -c \"import json,os; o=json.load(open(\\\"data/macro_override.json\\\",encoding=\\\"utf-8\\\")); war=o.get(\\\"war_active\\\"); print(f\\\"매크로 override: war_active={war}, vkospi={o.get(\\\\\\\"vkospi\\\\\\\")}\\\")\" 2>&1 >&2; fi; if [ -f data/kiwoom_data.json ]; then python -c \"import json,datetime; d=json.load(open(\\\"data/kiwoom_data.json\\\",encoding=\\\"utf-8\\\")); ts=d.get(\\\"updated_at\\\",\\\"\\\"); print(f\\\"수집기 마지막 업데이트: {ts}\\\")\" 2>&1 >&2; fi; if [ -f data/regime_state.json ]; then python -c \"import json; r=json.load(open(\\\"data/regime_state.json\\\",encoding=\\\"utf-8\\\")); print(f\\\"시스템 레짐: {r.get(\\\\\\\"state\\\\\\\")} (사유: {r.get(\\\\\\\"reason\\\\\\\",\\\\\\\"\\\\\\\")[:40]})\\\")\" 2>&1 >&2; fi; BRANCH=$(git branch --show-current 2>/dev/null); echo \"현재 브랜치: $BRANCH\" >&2; if [ \"$BRANCH\" = \"master\" ]; then echo \"⚠️  master 직접 작업 금지! son-dev로 전환 필요\" >&2; fi'",
+            "description": "세션 시작 시 환경 점검 (.env, 매크로, 수집기, 레짐, 브랜치)"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
