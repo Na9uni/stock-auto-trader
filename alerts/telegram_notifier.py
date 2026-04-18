@@ -122,7 +122,7 @@ class TelegramNotifier:
                 return True
             logger.error(
                 "텔레그램 발송 실패(plain fallback) chat_id=%s status=%s body=%s",
-                chat_id, status2, body2,
+                chat_id, status2, mask_bot_token(body2),
             )
             return False
 
@@ -138,7 +138,7 @@ class TelegramNotifier:
             return True
         logger.error(
             "텔레그램 발송 실패 chat_id=%s status=%s body=%s (attempt=2)",
-            chat_id, status3, body3,
+            chat_id, status3, mask_bot_token(body3),
         )
         return False
 

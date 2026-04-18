@@ -508,11 +508,18 @@ def _read_json(path: Path) -> dict | None:
 
 
 def _write_json(path: Path, data: dict) -> bool:
-    """JSON 파일 쓰기. 실패 시 False 반환."""
+    """JSON 파일 atomic 쓰기 (tempfile → os.replace).
+
+    main thread(save_auto_positions)와 commander 스레드가 동일 파일을
+    동시에 쓸 때 부분 쓰기/빈 파일 위험 방지. CLAUDE.md "atomic write" 원칙 준수.
+    """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        import os as _os
+        _os.replace(str(tmp), str(path))
         return True
     except OSError as exc:
         logger.error("JSON 쓰기 실패 %s: %s", path, exc)

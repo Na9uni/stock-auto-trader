@@ -247,7 +247,15 @@ def cleanup_stale_buy_in_progress(max_age_sec: int = 300) -> None:
             all_buy_tickers.add(ticker)
             if o.get("status") != "pending":
                 continue
-            submitted = o.get("submitted_at", "")
+
+            # 3차 감사 지적: submitted_at이 None/"" 면 **방금 접수된 주문**일 가능성 ↑.
+            # 이전 로직은 이를 stale로 오판 → 방금 접수 주문 즉시 _buy_in_progress에서 제거 → 중복 주문 위험.
+            # fallback 우선순위: submitted_at → created_at → 현재 시각 (= 방금 접수로 간주)
+            submitted = o.get("submitted_at") or o.get("created_at") or ""
+            if not submitted:
+                # 타임스탬프 완전 부재 → 안전하게 "방금 접수됨"으로 간주 (active_pending 유지)
+                active_pending.add(ticker)
+                continue
             try:
                 submit_dt = datetime.fromisoformat(submitted)
                 age_sec = (now - submit_dt).total_seconds()
@@ -256,8 +264,11 @@ def cleanup_stale_buy_in_progress(max_age_sec: int = 300) -> None:
                 else:
                     active_pending.add(ticker)
             except (ValueError, TypeError):
-                # submitted_at 파싱 실패 시 stale로 취급 (안전)
-                stale_tickers.add(ticker)
+                # 파싱 실패: 타임스탬프 포맷 이상 → 안전하게 active로 처리 (false positive stale 방지)
+                # 정말 오래된 주문이라면 다음 cycle에서 정상 파싱되거나 status가 바뀔 것.
+                logger.warning("[buy_in_progress] %s submitted_at 파싱 실패 (%r) — active로 유지",
+                               ticker, submitted)
+                active_pending.add(ticker)
 
         # 크래시 복구: pending인데 _buy_in_progress 없음 → 복구
         for ticker in active_pending - _buy_in_progress:
@@ -521,23 +532,36 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
                 return
             # MOCK: 거래 계속 진행 (데이터 수집용)
         # 일일 손실은 order_queue.json 1회 읽기로 판정 + 스냅샷 값 동시 확보 (race 방지)
+        # 3차 감사 지적: _MAX_DL<=0일 때 기존 is_daily_loss_exceeded는 "항상 차단"이었음.
+        # 내 로직은 > 0 가드로 "항상 허용"으로 바뀜 → 보안 후퇴. 안전 차단으로 복원.
         from alerts.market_guard import MAX_DAILY_LOSS as _MAX_DL
         _daily_loss_now = _get_today_daily_loss()
-        if _MAX_DL > 0 and _daily_loss_now >= _MAX_DL:
+        _daily_exceeded = False
+        if _MAX_DL <= 0:
+            logger.error(
+                "[안전] MAX_DAILY_LOSS=%d — 비정상 값 (market_guard._configure 미호출 또는 .env 실수?). "
+                "안전을 위해 매수 차단.", _MAX_DL,
+            )
+            _daily_exceeded = True
+        elif _daily_loss_now >= _MAX_DL:
+            _daily_exceeded = True
+        if _daily_exceeded:
             logger.warning("[자동매매] 당일 손실 한도 초과: %d / %d → 매수 차단",
                            _daily_loss_now, _MAX_DL)
             _record_filter_block("daily_loss")
-            _notify_loss_limit(
-                "daily",
-                "⏸️ [당일 손실 한도 초과]\n"
-                "오늘만 신규 매수 중단\n"
-                "→ 내일 09:00 자동 재개",
-                snapshot_info={
-                    "current_loss": _daily_loss_now,
-                    "limit_value": int(_MAX_DL),
-                    "positions": copy.deepcopy(load_auto_positions()),
-                },
-            )
+            # 비정상 _MAX_DL=0 시엔 알림/스냅샷 생략 (의미 없는 한도값으로 오염 방지)
+            if _MAX_DL > 0:
+                _notify_loss_limit(
+                    "daily",
+                    "⏸️ [당일 손실 한도 초과]\n"
+                    "오늘만 신규 매수 중단\n"
+                    "→ 내일 09:00 자동 재개",
+                    snapshot_info={
+                        "current_loss": _daily_loss_now,
+                        "limit_value": int(_MAX_DL),
+                        "positions": copy.deepcopy(load_auto_positions()),
+                    },
+                )
             if OPERATION_MODE != "MOCK":
                 return
             # MOCK: 거래 계속 진행 (데이터 수집용)

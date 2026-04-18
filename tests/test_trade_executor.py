@@ -799,6 +799,40 @@ class TestBuyInProgressCleanup:
         trade_executor.cleanup_stale_buy_in_progress()
         assert "999999" not in trade_executor._buy_in_progress
 
+    def test_null_submitted_at_kept_active(self, isolated_queue, monkeypatch):
+        """3차 감사 회귀 방지: submitted_at=None/""은 방금 접수로 간주, stale 아님."""
+        import json as _json
+        from alerts import trade_executor
+        # submitted_at 없는 주문 (방금 접수된 상태 가능)
+        isolated_queue.write_text(_json.dumps({
+            "orders": [
+                {"ticker": "005930", "side": "buy", "status": "pending",
+                 "submitted_at": None},
+                {"ticker": "000660", "side": "buy", "status": "pending",
+                 "submitted_at": ""},
+            ]
+        }), encoding="utf-8")
+        trade_executor._buy_in_progress.add("005930")
+        trade_executor._buy_in_progress.add("000660")
+        trade_executor.cleanup_stale_buy_in_progress()
+        # 둘 다 유지돼야 (중복 주문 방지)
+        assert "005930" in trade_executor._buy_in_progress
+        assert "000660" in trade_executor._buy_in_progress
+
+    def test_invalid_submitted_at_kept_active(self, isolated_queue, monkeypatch):
+        """submitted_at 파싱 실패해도 active로 유지 (false positive stale 방지)."""
+        import json as _json
+        from alerts import trade_executor
+        isolated_queue.write_text(_json.dumps({
+            "orders": [
+                {"ticker": "005930", "side": "buy", "status": "pending",
+                 "submitted_at": "invalid-timestamp"},
+            ]
+        }), encoding="utf-8")
+        trade_executor._buy_in_progress.add("005930")
+        trade_executor.cleanup_stale_buy_in_progress()
+        assert "005930" in trade_executor._buy_in_progress
+
 
 class TestDailyLossCalc:
     """일일 손실 실제 값 계산 (감사관 지적: 하드코딩된 0 대신)."""
