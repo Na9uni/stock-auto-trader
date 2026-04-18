@@ -35,7 +35,23 @@ _buy_in_progress: set[str] = set()
 # ---------------------------------------------------------------------------
 
 _LOSS_LIMIT_ALERT_PATH = Path(__file__).parent.parent / "data" / "loss_limit_alert.json"
-_LOSS_LIMIT_COOLDOWN_SEC = 86400  # 24h — 같은 한도는 하루 1번만 알림
+# 한도 사이클 기반 중복 방지 — 쿨다운 아닌 "LIVE 다운 1회 = 스냅샷 1회" 원칙
+# - monthly: 월 바뀔 때까지 1회
+# - daily:   자정 지날 때까지 1회
+# - consec:  카운터 0 리셋될 때까지 1회 (익절 1회 발생 시)
+
+
+def _compute_cycle_id(kind: str) -> str:
+    """한도 사이클 식별자. 같은 id면 같은 다운 이벤트로 간주하여 스냅샷 스킵."""
+    now = datetime.now()
+    if kind == "monthly":
+        return f"m-{now.strftime('%Y-%m')}"
+    if kind == "daily":
+        return f"d-{now.strftime('%Y-%m-%d')}"
+    if kind == "consec":
+        # 리셋될 때까지 같은 사이클. `_read_loss_limit_alerts`에서 자동 clear.
+        return "c-triggered"
+    return f"{kind}-unknown"
 
 
 def _read_loss_limit_alerts() -> dict:
@@ -65,29 +81,39 @@ def _notify_loss_limit(
     *,
     snapshot_info: dict | None = None,
 ) -> bool:
-    """손실 한도 초과 텔레그램 알림. 같은 kind는 24h 쿨다운.
+    """손실 한도 초과 텔레그램 알림 + MOCK 스냅샷. 한도 사이클당 1회.
 
     kind: "monthly" | "daily" | "consec"
     snapshot_info: MOCK 모드일 때 성과 스냅샷에 저장할 정보
                    {current_loss, limit_value, positions} 형태
                    None이면 스냅샷 생략 (LIVE 또는 기존 호출 호환)
 
-    쿨다운 공유: 알림이 쿨다운으로 스킵되면 스냅샷도 함께 스킵 (의도된 동작).
-                같은 한도 초과가 짧은 시간에 여러 번 걸려도 한 번만 기록.
+    **LIVE 관점에서 "다운=끝"이므로 MOCK에서도 같은 다운 이벤트엔 1회만 기록.**
+    한도 사이클(월/일/연속카운터)이 리셋되면 다시 트리거 가능.
 
     Returns:
-        True = 알림 발송됨 (쿨다운 통과), False = 쿨다운 중 스킵
+        True = 알림 발송됨 (새 사이클), False = 같은 사이클 내 스킵
     """
     now = datetime.now()
     alerts = _read_loss_limit_alerts()
-    last_str = alerts.get(kind)
-    if last_str:
+
+    # consec 리셋 감지: 카운터가 한도 밑으로 내려갔으면 사이클 ID clear
+    if alerts.get("consec_cycle_id"):
         try:
-            last = datetime.fromisoformat(last_str)
-            if (now - last).total_seconds() < _LOSS_LIMIT_COOLDOWN_SEC:
-                return False
-        except (ValueError, TypeError):
+            from alerts.file_io import load_monthly_loss as _lml
+            from alerts.market_guard import MAX_CONSEC_STOPLOSS as _MCS
+            if _lml().get("consec_stoploss", 0) < _MCS:
+                del alerts["consec_cycle_id"]
+        except Exception:
             pass
+
+    # 현재 사이클 ID vs 마지막 기록
+    current_cycle = _compute_cycle_id(kind)
+    last_cycle = alerts.get(f"{kind}_cycle_id")
+    if last_cycle == current_cycle:
+        return False  # 같은 다운 이벤트 — 스냅샷/알림 스킵
+
+    alerts[f"{kind}_cycle_id"] = current_cycle
     alerts[kind] = now.isoformat()
     _write_loss_limit_alerts(alerts)
     try:

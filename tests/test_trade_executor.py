@@ -403,16 +403,17 @@ class TestLossLimitAlert:
         _notify_loss_limit("consec", "연속")
         assert len(mock_notifier) == 3
 
-    def test_cooldown_expired_resends(self, mock_notifier, isolated_alert_path):
-        """24h 지난 타임스탬프는 재발송."""
+    def test_new_cycle_resends(self, mock_notifier, isolated_alert_path):
+        """이전 사이클 ID와 다르면 재발송 (예: 월 바뀜)."""
         import json as _json
         from alerts.trade_executor import _notify_loss_limit
-        old_ts = (datetime.now() - timedelta(hours=25)).isoformat()
+        # 지난달 사이클로 기록해둠
         isolated_alert_path.parent.mkdir(parents=True, exist_ok=True)
         isolated_alert_path.write_text(
-            _json.dumps({"monthly": old_ts}), encoding="utf-8"
+            _json.dumps({"monthly_cycle_id": "m-2026-03"}), encoding="utf-8"
         )
-        _notify_loss_limit("monthly", "재발송")
+        # 현재 월 = 2026-04 이상이므로 다른 사이클
+        _notify_loss_limit("monthly", "새 달 트리거")
         assert len(mock_notifier) == 1
 
 
@@ -558,8 +559,8 @@ class TestLossLimitSnapshot:
         files = list(isolated_snapshot_dir.glob("snapshot_*.json"))
         assert len(files) == 0
 
-    def test_cooldown_also_skips_snapshot(self, mock_notifier, isolated_alert_path, isolated_snapshot_dir, monkeypatch):
-        """쿨다운 중에는 알림도 안 가고 스냅샷도 저장 안 됨."""
+    def test_same_cycle_skips_snapshot(self, mock_notifier, isolated_alert_path, isolated_snapshot_dir, monkeypatch):
+        """같은 한도 사이클 내에서 두 번째 호출은 스냅샷/알림 둘 다 스킵."""
         from alerts import trade_executor
         monkeypatch.setattr(trade_executor, "OPERATION_MODE", "MOCK")
         trade_executor._notify_loss_limit(
@@ -568,10 +569,65 @@ class TestLossLimitSnapshot:
         )
         trade_executor._notify_loss_limit(
             "monthly", "두 번째",
-            snapshot_info={"current_loss": 61000, "limit_value": 60000, "positions": {}},
+            snapshot_info={"current_loss": 80000, "limit_value": 60000, "positions": {}},
         )
         files = list(isolated_snapshot_dir.glob("snapshot_*_monthly.json"))
-        assert len(files) == 1  # 쿨다운 때문에 하나만
+        assert len(files) == 1  # 같은 월 사이클이라 하나만
+        assert len(mock_notifier) == 1  # 알림도 하나만
+
+
+class TestCycleReset:
+    """한도 사이클 리셋 감지 (LIVE 다운=끝 철학)."""
+
+    @pytest.fixture
+    def mock_notifier(self, monkeypatch):
+        calls = []
+
+        class _Mock:
+            def send_to_users(self, users, msg):
+                calls.append((users, msg))
+
+        monkeypatch.setattr("alerts.telegram_notifier.TelegramNotifier", lambda: _Mock())
+        return calls
+
+    @pytest.fixture
+    def isolated_alert_path(self, tmp_path, monkeypatch):
+        from alerts import trade_executor
+        p = tmp_path / "loss_limit_alert.json"
+        monkeypatch.setattr(trade_executor, "_LOSS_LIMIT_ALERT_PATH", p)
+        return p
+
+    def test_consec_reset_allows_retrigger(self, mock_notifier, isolated_alert_path, monkeypatch):
+        """consec 카운터가 0으로 리셋되면 다음 초과 시 재트리거."""
+        import json as _json
+        from alerts import trade_executor, market_guard
+        monkeypatch.setattr(market_guard, "MAX_CONSEC_STOPLOSS", 2)
+        # 1차 트리거 상태로 설정
+        isolated_alert_path.parent.mkdir(parents=True, exist_ok=True)
+        isolated_alert_path.write_text(
+            _json.dumps({"consec_cycle_id": "c-triggered"}), encoding="utf-8"
+        )
+        # 카운터 0 (리셋됨) 시뮬
+        monkeypatch.setattr("alerts.file_io.load_monthly_loss", lambda: {"consec_stoploss": 0})
+        # 이제 다시 알림 호출하면 cycle clear 된 상태 → 트리거 가능
+        result = trade_executor._notify_loss_limit("consec", "리셋 후 재트리거")
+        assert result is True  # 새 사이클
+        assert len(mock_notifier) == 1
+
+    def test_consec_still_exceeded_stays_silent(self, mock_notifier, isolated_alert_path, monkeypatch):
+        """consec 카운터가 여전히 한도 이상이면 같은 사이클 — 스킵."""
+        import json as _json
+        from alerts import trade_executor, market_guard
+        monkeypatch.setattr(market_guard, "MAX_CONSEC_STOPLOSS", 2)
+        isolated_alert_path.parent.mkdir(parents=True, exist_ok=True)
+        isolated_alert_path.write_text(
+            _json.dumps({"consec_cycle_id": "c-triggered"}), encoding="utf-8"
+        )
+        # 카운터 3 (여전히 초과)
+        monkeypatch.setattr("alerts.file_io.load_monthly_loss", lambda: {"consec_stoploss": 3})
+        result = trade_executor._notify_loss_limit("consec", "추가 호출")
+        assert result is False  # 같은 사이클
+        assert len(mock_notifier) == 0
 
 
 class TestDailyLossCalc:
