@@ -151,10 +151,12 @@ def _process_signal(
         logger.debug("[신호] %s 쿨다운 중 → 스킵", name)
         return
 
-    # AI 분석 (매수 신호만)
+    # AI 분석 (매수 신호만 + 데이터 완전할 때만)
     ai_decision = ""
     ai_text = ""
-    if signal.signal_type == SignalType.BUY:
+    _exec_str = float(info.get("exec_strength", 0))
+    _has_complete_data = _exec_str > 0  # 체결강도 0이면 데이터 불완전 → AI 스킵
+    if signal.signal_type == SignalType.BUY and _has_complete_data:
         # 5분봉 지표에서 RSI/MACD/거래량 추출 (VB 등 일봉 전략은 자체 값 없으므로)
         _sig_rsi = signal.rsi
         _sig_macd = signal.macd_cross
@@ -177,11 +179,11 @@ def _process_signal(
                         else ("dead" if _ph > 0 and _h <= 0 else None)
                     )
 
-        # vol_ratio가 nan이면 kiwoom_data에서 직접 계산
+        # vol_ratio가 nan이거나 float 아니면 kiwoom_data에서 직접 계산 (master 타입 안전 버전 채택)
         import math
-        if math.isnan(_sig_vol):
-            _cur_vol = info.get("volume", 0)
-            _prev_vol = info.get("prev_volume", 0)
+        if math.isnan(_sig_vol) if isinstance(_sig_vol, float) else True:
+            _cur_vol = int(info.get("volume", 0))
+            _prev_vol = int(info.get("prev_volume", 0))
             if _prev_vol > 0:
                 _sig_vol = _cur_vol / _prev_vol
         _exec = float(info.get("exec_strength", 0.0))
@@ -198,9 +200,34 @@ def _process_signal(
         ai_decision = ai_result.get("decision", "")
         ai_text = ai_result.get("text", "")
 
+    # 데이터 불완전 시 AI 스킵 메시지
+    if signal.signal_type == SignalType.BUY and not _has_complete_data:
+        ai_block = ""  # AI 의견 없이 깔끔하게
+
+    # AI 분석 텍스트를 쉬운 말로 변환
+    elif ai_text:
+        # 체결강도/거래량 데이터 문제로 "관망"이면 → AI 의견 생략
+        _data_issue = any(kw in ai_text for kw in ["체결강도 0", "거래량 배수 nan", "거래 부재", "데이터 부재"])
+        if _data_issue and "[관망]" in ai_text:
+            ai_block = "\n💬 AI 의견: ℹ️ 데이터 수집 중 (정상, 무시하세요)\n"
+        else:
+            simple_ai = ai_text
+            simple_ai = simple_ai.replace("치명적 리스크", "주의 필요")
+            simple_ai = simple_ai.replace("유동성 리스크", "거래 부족 위험")
+            simple_ai = simple_ai.replace("슬리피지", "가격 차이")
+            if "[매수]" in simple_ai or "매수" == ai_decision:
+                ai_block = f"\n💬 AI 의견: ✅ 사도 좋겠어요!\n"
+            elif "[관망]" in simple_ai:
+                ai_block = f"\n💬 AI 의견: ⏸️ 지켜보세요 (참고만)\n"
+            elif "[매도]" in simple_ai:
+                ai_block = f"\n💬 AI 의견: 🚨 사지 마세요!\n"
+            else:
+                ai_block = f"\n💬 AI 의견: {simple_ai}\n"
+    else:
+        ai_block = ""
+
     # 알림
     header = build_signal_header(ticker, name, signal, info)
-    ai_block = f"\n[AI 분석]\n{ai_text}\n" if ai_text else ""
     full_msg = header + ai_block + CMD_FOOTER
 
     target_ids = get_users_for_ticker(ticker)
@@ -577,12 +604,25 @@ def check_eod_liquidation() -> None:
     liquidated = []
 
     for ticker, pos in list(positions.items()):
-        # manual, 추세추종, 이미 매도 중인 포지션 제외
+        # manual, 이미 매도 중, swing 의도 포지션은 제외
         if pos.get("manual"):
             continue
-        if pos.get("strategy") == "trend_following":
-            continue
         if pos.get("selling"):
+            continue
+
+        # 위기 평균회귀(RSI2 반등) 포지션은 전용 로직에서 관리 — EOD 청산 대상 아님.
+        # rule_name이 TRADING_STYLE과 무관하게 항상 우선 스킵.
+        if "위기MR" in pos.get("rule_name", ""):
+            continue
+
+        # intent 기반 판정 (새 포지션) + strategy 태그 fallback (legacy 포지션)
+        # intent="swing" → 청산 제외 (데이 넘어 보유)
+        # intent 없음/빈 문자열이면 legacy strategy 태그로 판단 (방어: 수동 편집 대비)
+        intent = pos.get("intent")
+        if intent == "swing":
+            continue
+        if (intent in (None, "")) and pos.get("strategy") == "trend_following":
+            # 구 포지션(intent 필드 없음/빈 값): legacy 로직 유지
             continue
 
         name = pos.get("name", ticker)
@@ -772,17 +812,39 @@ def check_heartbeat() -> None:
         now = datetime.now()
 
         emoji = regime_emoji.get(regime, "⚪")
+
+        # 자가진단 실행 (사용자 요청: 30분마다 heartbeat에 항목별 결과 포함)
+        diag_lines: list[str] = []
+        diag_all_ok = True
+        try:
+            from alerts.self_diagnostic import run_diagnostic
+            results = run_diagnostic()
+            diag_lines.append("")
+            diag_lines.append("🔧 [자가진단]")
+            for dname, ok, detail in results:
+                icon = "✅" if ok else "❌"
+                diag_lines.append(f"  {icon} {dname}: {detail}")
+                if not ok:
+                    diag_all_ok = False
+        except Exception as diag_err:
+            diag_lines.append(f"\n⚠️ 자가진단 실패: {diag_err}")
+            diag_all_ok = False
+
+        header = "✅ [정상 작동 중]" if diag_all_ok else "⚠️ [이상 감지]"
         msg = (
-            f"✅ [정상 작동 중] {now.strftime('%H:%M')}\n"
+            f"{header} {now.strftime('%H:%M')}\n"
             f"레짐: {emoji} {regime.value.upper()}\n"
             f"보유: 자동 {auto_count}종목 / manual {manual_count}종목\n"
             f"오늘: 매수 {today_buys}건 / 매도 {today_sells}건"
         )
         if today_pnl != 0:
             msg += f" / 손익 {today_pnl:+,}원"
+        if diag_lines:
+            msg += "\n" + "\n".join(diag_lines)
 
         notifier = TelegramNotifier()
         notifier.send_to_users([get_admin_id()], msg)
-        logger.info("[하트비트] 정상 작동 알림 발송")
+        logger.info("[하트비트] 정상 작동 알림 발송 (자가진단 %s)",
+                    "OK" if diag_all_ok else "이상")
     except Exception as e:
         logger.error("[하트비트] 알림 실패: %s", e)

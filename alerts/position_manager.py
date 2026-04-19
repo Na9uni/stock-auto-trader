@@ -29,6 +29,60 @@ logger = logging.getLogger("stock_analysis")
 
 _sell_fail_count: dict[str, int] = {}
 
+# manual -15% 비상경보 중복 방지용 (티커별 30분 쿨다운 — 장시간 하락 시 스팸 방지)
+_last_manual_emergency_alert: dict[str, datetime] = {}
+
+
+# hard_stale 경보 파일 영속화 — 프로세스 재시작 플래핑 방지 (10분 쿨다운)
+_HARD_STALE_PATH = __import__("pathlib").Path(__file__).parent.parent / "data" / "hard_stale_alert.json"
+_HARD_STALE_COOLDOWN_SEC = 600
+
+
+def _read_last_hard_stale() -> datetime | None:
+    try:
+        if not _HARD_STALE_PATH.exists():
+            return None
+        with open(_HARD_STALE_PATH, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        ts = raw.get("last_alert_at")
+        return datetime.fromisoformat(ts) if ts else None
+    except Exception:
+        return None
+
+
+def _write_last_hard_stale(ts: datetime) -> None:
+    try:
+        _HARD_STALE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _HARD_STALE_PATH.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"last_alert_at": ts.isoformat()}, f)
+        import os as _os
+        _os.replace(tmp, _HARD_STALE_PATH)
+    except Exception as e:
+        logger.warning("[hard_stale] 파일 저장 실패: %s", e)
+
+
+def _notify_hard_stale(age: float) -> None:
+    """Hard stale 상태를 텔레그램으로 1회 경보 (10분 쿨다운, 파일 영속화).
+
+    재시작 시에도 쿨다운이 유지되어 재시작 플래핑 구간의 경보 중복을 방지.
+    """
+    now = datetime.now()
+    last = _read_last_hard_stale()
+    if last is not None and (now - last).total_seconds() < _HARD_STALE_COOLDOWN_SEC:
+        return
+    _write_last_hard_stale(now)
+    try:
+        TelegramNotifier().send_to_users(
+            [get_admin_id()],
+            f"⚠️ [수집기 데이터 지연] {int(age)}초 전 데이터\n"
+            f"자동 포지션 손절/트레일링 일시 중단\n"
+            f"→ 키움 수집기 상태 확인 필요"
+            + CMD_FOOTER,
+        )
+    except Exception as e:
+        logger.warning("[hard_stale] 텔레그램 경보 실패: %s", e)
+
 # ---------------------------------------------------------------------------
 # 설정 (analysis_scheduler에서 주입)
 # ---------------------------------------------------------------------------
@@ -114,15 +168,35 @@ def _cleanup_failed_positions(positions: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def check_auto_positions() -> None:
-    """1분마다: 보유 포지션 손절/트레일링/과매수 감시."""
+    """1분마다: 보유 포지션 손절/트레일링/과매수 감시.
+
+    Stale data 2단계 정책:
+      - age > 120초(STALE_SOFT): 트레일링/과매수 스킵, 손절만 허용 (정상 업데이트 직전의 일시적 지연일 수 있음)
+      - age > 300초(STALE_HARD): 자동 손절/트레일링 스킵, 텔레그램 1회 경보(10분 쿨다운).
+        stale 시세 기반 자동 판정은 슬리피지 위험. manual 비상 -15% 경보는 계속 수행
+        (데이터가 오래돼도 포지션 위험을 알리는 가치가 더 큼).
+    """
+    STALE_SOFT_SEC = 120
+    STALE_HARD_SEC = 300
+
     stale_data = False
+    hard_stale = False
     try:
         with open(KIWOOM_DATA_PATH, "r", encoding="utf-8") as f:
             kiwoom = json.load(f)
         updated_at = datetime.strptime(kiwoom["updated_at"], "%Y-%m-%dT%H:%M:%S")
         age = (datetime.now() - updated_at).total_seconds()
-        if age > 120:
-            logger.warning("kiwoom_data.json이 %.0f초 전 데이터 — 손절만 체크", age)
+        if age > STALE_HARD_SEC:
+            logger.warning(
+                "kiwoom_data.json이 %.0f초 전 데이터 — HARD STALE, 자동 청산 스킵 (수집기 복구 대기)",
+                age,
+            )
+            hard_stale = True
+            stale_data = True
+            # 텔레그램 1회 경보 (10분 쿨다운)
+            _notify_hard_stale(age)
+        elif age > STALE_SOFT_SEC:
+            logger.warning("kiwoom_data.json이 %.0f초 전 데이터 — 손절만 체크 (트레일링 스킵)", age)
             stale_data = True
         all_stocks = kiwoom.get("stocks", {})
     except Exception:
@@ -196,8 +270,10 @@ def check_auto_positions() -> None:
 
     for ticker, pos in list(positions.items()):
         # 분할 매수 2차 진입: 현재가가 1차 매수가 이상이면 추가 매수
+        # ⚠️ hard_stale 상태에서는 신규 진입(=2차 매수)을 실행하지 않음. stale 시세 기반
+        # 매수는 슬리피지 폭발 위험. manual 경보 이후, 자동 청산 루프에서 같이 스킵.
         split_remaining = pos.get("split_remaining", 0)
-        if split_remaining > 0 and not pos.get("manual"):
+        if split_remaining > 0 and not pos.get("manual") and not hard_stale:
             name = pos.get("name", ticker)
             current_price = int(all_stocks.get(ticker, {}).get("current_price", 0))
             buy_price = pos.get("buy_price", 0)
@@ -206,9 +282,17 @@ def check_auto_positions() -> None:
                 # 2차 매수 실행
                 from alerts.trade_executor import OPERATION_MODE
                 if OPERATION_MODE == "MOCK":
-                    pos["qty"] = int(pos.get("qty", 0)) + split_remaining
-                    pos["buy_price"] = int((pos["buy_price"] * (pos["qty"] - split_remaining) + current_price * split_remaining) / pos["qty"])
-                    pos["buy_amount"] = pos["buy_price"] * pos["qty"]
+                    # 평균 단가 계산: (1차 qty*1차가 + 2차 qty*현재가) / 총 qty
+                    # master 채택 — 명시적 변수로 순서 의존 제거 (son-dev 원본은 qty 역산 난해)
+                    first_qty = int(pos.get("qty", 0))
+                    first_price = int(pos["buy_price"])
+                    new_qty = first_qty + split_remaining
+                    new_avg_price = int(
+                        (first_price * first_qty + current_price * split_remaining) / new_qty
+                    )
+                    pos["qty"] = new_qty
+                    pos["buy_price"] = new_avg_price
+                    pos["buy_amount"] = new_avg_price * new_qty  # son-dev 추가 — 대시보드/리포트 정합성
                     pos.pop("split_remaining", None)
                     pos.pop("split_price", None)
                     logger.info("[분할매수 2차] %s +%d주 @%s → 총 %d주", name, split_remaining, f"{current_price:,}", pos["qty"])
@@ -246,29 +330,39 @@ def check_auto_positions() -> None:
 
         if pos.get("manual", False):
             # ── P1-9: manual 포지션도 비상 손절만 적용 (-15%) ──
+            # 경보 쿨다운 30분 — 매분 호출이라 쿨다운 없으면 하락장 내내 스팸.
             buy_price = pos.get("buy_price", 0)
             name = pos.get("name", ticker)
             current_price = int(all_stocks.get(ticker, {}).get("current_price", 0))
             if buy_price > 0 and current_price > 0:
                 pct = (current_price - buy_price) / buy_price * 100
                 if pct <= -15:
-                    logger.warning(
-                        "[비상손절] %s manual 포지션 -15%% 도달 (현재가 %s, 매수가 %s)",
-                        name, current_price, buy_price,
-                    )
-                    try:
-                        notifier.send_to_users(
-                            [get_admin_id()],
-                            f"🚨 [비상 경고] {name} ({ticker})\n"
-                            f"💰 매수가: {buy_price:,}원 → 현재가: {current_price:,}원\n"
-                            f"📉 손실: {pct:.1f}%\n"
-                            f"⚠️ manual 포지션이라 자동매도 안 됨. 직접 확인 필요!"
-                            + CMD_FOOTER,
+                    now = datetime.now()
+                    last = _last_manual_emergency_alert.get(ticker)
+                    if last is None or (now - last).total_seconds() >= 1800:  # 30분
+                        _last_manual_emergency_alert[ticker] = now
+                        logger.warning(
+                            "[비상손절] %s manual 포지션 -15%% 도달 (현재가 %s, 매수가 %s)",
+                            name, current_price, buy_price,
                         )
-                    except Exception:
-                        pass
+                        try:
+                            notifier.send_to_users(
+                                [get_admin_id()],
+                                f"🚨 [비상 경고] {name} ({ticker})\n"
+                                f"💰 매수가: {buy_price:,}원 → 현재가: {current_price:,}원\n"
+                                f"📉 손실: {pct:.1f}%\n"
+                                f"⚠️ manual 포지션이라 자동매도 안 됨. 직접 확인 필요!"
+                                + CMD_FOOTER,
+                            )
+                        except Exception:
+                            pass
             continue
         if pos.get("selling"):
+            continue
+
+        # hard_stale: 자동 포지션 손절/트레일링 판정 전체 스킵
+        # (manual 비상경보는 위에서 이미 처리됨)
+        if hard_stale:
             continue
 
         buy_price = pos.get("buy_price", 0)
@@ -277,9 +371,10 @@ def check_auto_positions() -> None:
             continue
 
         name = pos.get("name", ticker)
-        # 위기MR 포지션은 _check_crisis_meanrev에서 전용 관리 → 여기서 스킵
-        if "위기MR" in pos.get("rule_name", ""):
-            continue
+        # NOTE: 과거 "위기MR" 포지션은 crisis_manager._check_crisis_meanrev에서 전용 관리 했으나
+        # 해당 함수는 현 아키텍처에서 스케줄 미등록 dead code. AutoStrategy 경로로 매수된
+        # 평균회귀 포지션은 이제 일반 손절/트레일링으로 관리됨 (EOD 청산만 rule_name으로 스킵).
+        # 위기MR 전용 트레일링(-1.5%)/시간청산(48h)은 향후 별도 설계로 분리 필요.
 
         stock_info = all_stocks.get(ticker, {})
         current_price = int(stock_info.get("current_price", 0))
@@ -342,7 +437,7 @@ def check_auto_positions() -> None:
                             f"수량: {half_qty}주 / 수익: {pct:+.1f}%\n"
                             f"잔여 {qty - half_qty}주 트레일링 관리"
                             + CMD_FOOTER,
-                    )
+                        )
 
         # RSI + ATR 조회
         rsi = 50.0

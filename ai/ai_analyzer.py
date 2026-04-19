@@ -61,18 +61,10 @@ class AIAnalyzer:
         if not self.api_key:
             return {"decision": "관망", "text": "API 키 미설정"}
 
-        candle_info = ""
-        if recent_candles:
-            candle_info = f"\n최근 캔들: {json.dumps(recent_candles, ensure_ascii=False)}"
-
-        orderbook_info = ""
-        if orderbook:
-            orderbook_info = f"\n호가창: {json.dumps(orderbook, ensure_ascii=False)}"
-
+        import math as _math
         # 데이터를 사람 말로 번역
-        import math
-        if math.isnan(vol_ratio) or vol_ratio == 0:
-            vol_desc = "거래가 거의 없음"
+        if _math.isnan(vol_ratio) if isinstance(vol_ratio, float) else True:
+            vol_desc = "거래량 정보 없음"
         elif vol_ratio < 0.5:
             vol_desc = "평소보다 거래 적음"
         elif vol_ratio < 1.5:
@@ -83,13 +75,25 @@ class AIAnalyzer:
             vol_desc = "거래 폭발적"
 
         if exec_strength == 0:
-            exec_desc = "사고파는 사람 데이터 없음"
+            exec_desc = "매수세 데이터 없음"
         elif exec_strength < 80:
             exec_desc = "파는 사람이 더 많음"
         elif exec_strength < 120:
             exec_desc = "사고파는 힘이 비슷함"
         else:
             exec_desc = "사려는 사람이 더 많음"
+
+        candle_info = ""
+        if recent_candles:
+            candle_info = f"\n최근 캔들: {json.dumps(recent_candles, ensure_ascii=False)}"
+
+        orderbook_info = ""
+        if orderbook:
+            orderbook_info = f"\n호가창: {json.dumps(orderbook, ensure_ascii=False)}"
+
+        # vol_desc/exec_desc는 위(66~84줄)에서 이미 계산됨.
+        # 프롬프트는 son-dev의 초보자 친화 버전 채택 (아빠 테스트 피드백 반영).
+        # master의 "초등학생도 이해할 수 있게" 지시는 아래 프롬프트에 이미 반영됨.
 
         prompt = f"""너는 주식 초보에게 사도 될지 말해주는 도우미야.
 이 종목은 자동 분석에서 "살 만하다" 점수를 받았어. 근데 진짜 사도 괜찮은지 한번 더 확인해줘.

@@ -141,6 +141,7 @@ class AutoStrategy:
                         )
 
                 vb_signal.reasons.insert(0, "[AUTO-상승장] 데이트레이딩 모드")
+                vb_signal.underlying_strategy = self._vb.name  # VB 원본 보존 (저점 필터 분기용)
                 vb_signal.strategy_name = self.name
                 return vb_signal
 
@@ -158,6 +159,7 @@ class AutoStrategy:
             # 1차: 추세추종 BUY (골든크로스 감지)
             if trend_signal.signal_type == SignalType.BUY:
                 trend_signal.reasons.insert(0, "[AUTO-하락장] 추세추종 모드")
+                trend_signal.underlying_strategy = self._trend.name
                 trend_signal.strategy_name = self.name
                 return trend_signal
 
@@ -167,12 +169,14 @@ class AutoStrategy:
                 mr_signal = self._crisis_mr.evaluate(ctx)
                 if mr_signal.signal_type == SignalType.BUY:
                     mr_signal.reasons.insert(0, "[AUTO-하락장] 위기 평균회귀")
+                    mr_signal.underlying_strategy = self._crisis_mr.name
                     mr_signal.strategy_name = self.name
                     return mr_signal
 
             # SELL 신호는 통과
             if trend_signal.signal_type == SignalType.SELL:
                 trend_signal.reasons.insert(0, "[AUTO-하락장] 추세추종 모드")
+                trend_signal.underlying_strategy = self._trend.name
                 trend_signal.strategy_name = self.name
                 return trend_signal
 

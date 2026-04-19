@@ -73,33 +73,24 @@ def _configure(
 # ---------------------------------------------------------------------------
 
 def _calc_trade_amount(price: int = 0) -> int:
-    """예수금 기반 슬롯별 매수 금액 계산.
+    """슬롯별 매수 금액 계산 (master 구조 + son-dev price 파라미터 병합).
 
-    MOCK 모드에서 MOCK_SEED_MONEY가 설정되어 있으면 실제 예수금 대신 가상 시드머니 사용.
+    - MOCK 모드: 수동 포지션과 완전 분리. AUTO_TRADE_AMOUNT 슬롯당 고정 예산.
+      (사용자 요청: "수동은 없는 거라고 보고, 자동만 시드머니 N만원")
+      → AUTO_TRADE_AMOUNT × MAX_SLOTS = 자동매매 전용 시드
+    - LIVE 모드: 실제 예수금 기반 계산 (과매수 방지).
 
     Args:
-        price: 대상 종목 현재가. 전달되면 슬롯 예산이 1주 미만일 때 1주 금액까지 증액 허용
-               (비싼 종목도 매수 가능하도록). 예수금은 절대 초과하지 않음.
+        price: 대상 종목 현재가. LIVE에서 슬롯 예산 < 1주 가격일 때 1주 금액까지 증액
+               (비싼 종목 매수 허용, MAX_ORDER_AMOUNT 범위 내, 예수금 내에서만).
+
+    VETO 방어선 유지 (리스크 매니저 복구):
+    - 레짐별 max_slots 오버라이드 (MOCK/LIVE 공통)
+    - manual 포지션 슬롯 제외
+    - MAX_ORDER_AMOUNT 상한 (단일 종목 집중 방지)
     """
     try:
-        with open(KIWOOM_DATA_PATH, "r", encoding="utf-8") as f:
-            kd = json.load(f)
-        balance = int(kd.get("account", {}).get("balance", 0))
-        # MOCK 모드 + MOCK_SEED_MONEY 설정 시 가상 시드 사용 (실제 예수금 무시)
-        if MOCK_MODE:
-            mock_seed = int(os.getenv("MOCK_SEED_MONEY", "0") or "0")
-            if mock_seed > 0:
-                balance = mock_seed
-        if balance <= 0 and not MOCK_MODE:
-            logger.info("[시드머니] 예수금 0 → 매수 불가")
-            return 0
-        if balance <= 0 and MOCK_MODE:
-            # MOCK 모드에서 예수금 0이면 AUTO_TRADE_AMOUNT 사용
-            return AUTO_TRADE_AMOUNT
-
-        # 레짐별 max_slots 오버라이드 (MOCK/LIVE 공통 — 리스크 매니저 VETO 반영)
-        # 이전 MOCK 우회는 "CASH에서도 매수 테스트" 목적이었으나 손실 방어 약화로 VETO 행사됨.
-        # MOCK도 레짐 제약을 준수해야 실전 시뮬레이션 의미 있음.
+        # 레짐별 max_slots 오버라이드 (공통 — MOCK도 레짐 제약 준수)
         effective_max_slots = MAX_SLOTS
         try:
             from strategies.regime_engine import get_regime_engine
@@ -108,13 +99,30 @@ def _calc_trade_amount(price: int = 0) -> int:
         except Exception:
             pass
 
-        # manual 포지션은 슬롯에서 제외
+        # manual 포지션은 슬롯에서 완전히 제외 (공통)
         all_pos = load_auto_positions()
         auto_count = sum(1 for p in all_pos.values() if not p.get("manual", False))
         holding_count = auto_count + len(_buy_in_progress)
         free_slots = effective_max_slots - holding_count
         if free_slots <= 0:
             logger.info("[시드머니] 슬롯 꽉참 (%d/%d)", holding_count, effective_max_slots)
+            return 0
+
+        if MOCK_MODE:
+            # MOCK: 자동매매 전용 시드 = AUTO_TRADE_AMOUNT × MAX_SLOTS
+            # 수동 포지션/실제 예수금 영향 없이 항상 AUTO_TRADE_AMOUNT 고정 반환
+            amount = min(AUTO_TRADE_AMOUNT, MAX_ORDER_AMOUNT)
+            if amount < 10000:
+                logger.info("[시드머니] 슬롯 예산 %s원 < 최소 1만원 → 매수 불가", f"{amount:,}")
+                return 0
+            return amount
+
+        # LIVE: 실제 예수금 기반
+        with open(KIWOOM_DATA_PATH, "r", encoding="utf-8") as f:
+            kd = json.load(f)
+        balance = int(kd.get("account", {}).get("balance", 0))
+        if balance <= 0:
+            logger.info("[시드머니] 예수금 0 → 매수 불가")
             return 0
         amount = balance // free_slots
         # MAX_ORDER_AMOUNT 상한 복구 (리스크 매니저 VETO 반영)
@@ -222,11 +230,44 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
             logger.info("[자동매매] %s 필터 제외: %s", name, reason)
             return
 
-        # 금액 계산 (price를 먼저 구해서 전달 — 비싼 종목 1주 매수 허용 로직 활용)
-        price = int(stock.get("current_price", 0))
-        if price <= 0:
+        # 하루 동일 종목 매매 횟수 제한 (master 추가 — 데이트레이딩 재진입 무한루프 방지)
+        from alerts.market_guard import daily_buy_count_ok
+        if not daily_buy_count_ok(ticker):
             return
 
+        # 저점 매수 필터 (master 추가) — 당일 고가 대비 N% 이상 눌렸을 때만 매수
+        # 사용자 요청: "매수신호가 오면 최대한 저점에서 매수, 보유 인터벌 확보"
+        # ⚠️ VB(변동성 돌파)는 "돌파 순간 즉시 매수"가 철학이라 필터 제외.
+        # → trend_following / crisis_meanrev 등 추세/평균회귀 전략에만 적용.
+        # 기본 0.3%, .env의 PULLBACK_PCT로 조정 가능.
+        current_price_now = int(stock.get("current_price", 0))
+        day_high = int(stock.get("high", 0) or 0)
+        import os as _os_pb
+        try:
+            PULLBACK_PCT = float(_os_pb.getenv("PULLBACK_PCT", "0.3"))
+        except ValueError:
+            PULLBACK_PCT = 0.3
+        underlying = (getattr(signal, "underlying_strategy", "") or "").lower()
+        strategy_name = (getattr(signal, "strategy_name", "") or "").lower()
+        is_breakout_strategy = (
+            underlying in ("vb", "volatility_breakout")
+            or strategy_name in ("vb", "volatility_breakout")
+        )
+        apply_pullback = not is_breakout_strategy
+        if apply_pullback and day_high > 0 and current_price_now > 0:
+            pullback = (day_high - current_price_now) / day_high * 100
+            if pullback < PULLBACK_PCT:
+                logger.info(
+                    "[자동매매] %s 저점대기: 현재가 %s / 당일고가 %s (눌림 %.2f%% < %.1f%%) [strategy=%s/underlying=%s]",
+                    name, f"{current_price_now:,}", f"{day_high:,}", pullback, PULLBACK_PCT,
+                    strategy_name or "?", underlying or "?",
+                )
+                return
+
+        # 금액 계산 (son-dev price 파라미터 전달 — 비싼 종목 1주 매수 허용 로직 활용)
+        price = current_price_now
+        if price <= 0:
+            return
         amount = _calc_trade_amount(price=price)
         if amount <= 0:
             return
@@ -237,76 +278,103 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
         _buy_in_progress.add(ticker)
         logger.debug("[자동매매] %s 매수 진행: qty=%d, price=%s, mode=%s", name, quantity, f"{price:,}", OPERATION_MODE)
 
-        if OPERATION_MODE == "MOCK":
-            # 분할 매수: 1차 60% 즉시, 2차 40% 보류
-            first_qty = max(1, int(quantity * 0.6))
-            remaining_qty = quantity - first_qty
-
-            logger.info(
-                "[가상매매] %s 1차 매수 체결 %d주 @%s (분할 1/2, 금액 %s)",
-                name, first_qty, f"{price:,}", f"{price * first_qty:,}",
-            )
-            from trading.trade_journal import record_trade
-            record_trade(
-                ticker=ticker, name=name, side="buy",
-                quantity=first_qty, price=price,
-                reason=", ".join(signal.reasons[:2]),
-                strategy=signal.strategy_name if hasattr(signal, "strategy_name") else "",
-                mock=True,
-                exec_strength=float(stock.get("exec_strength", 0)),
-                ai_decision=ai_decision,
-            )
-            notifier.send_to_users(
-                [get_admin_id()],
-                f"🛒 [가상 매수 1차] {name} ({ticker})\n"
-                f"💰 수량: {first_qty}주 / 가격: {price:,}원 (60%)\n"
-                f"💵 투자금액: {price * first_qty:,}원\n"
-                f"📊 사유: {', '.join(signal.reasons[:3])}\n"
-                f"⏳ 2차 매수({remaining_qty}주) 다음 체크에서 확인\n"
-                f"⚠️ 모의투자"
-                + CMD_FOOTER,
-            )
-            # Determine strategy mode from regime (EOD liquidation용)
-            try:
-                from strategies.regime_engine import get_regime_engine
-                _regime = get_regime_engine().state.value
-                _strategy_tag = "trend_following" if _regime in ("swing", "defense", "cash") else "vb"
-            except Exception:
-                _strategy_tag = ""
-            positions = load_auto_positions()
-            positions[ticker] = {
-                "name": name,
-                "qty": first_qty,
-                "buy_price": price,
-                "buy_amount": price * first_qty,
-                "buy_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "bought_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-                "high_price": price,
-                "trailing_activated": False,
-                "rule_name": f"자동매매_{signal.strength.name}" if hasattr(signal, 'strength') else "자동매매",
-                "mock": True,
-                "split_remaining": remaining_qty,
-                "split_price": price,
-                "strategy": _strategy_tag,
-            }
-            save_auto_positions(positions)
-            _buy_in_progress.discard(ticker)
-        else:
-            buy_result = execute_buy(ticker, name, quantity, price,
-                                     rule_name=f"자동매매_{signal.strength.name}")
-            if buy_result.get("status") == "pending":
+        # _buy_in_progress 누수 방지용 플래그.
+        # MOCK 성공 또는 LIVE pending이면 _keep_in_progress=True → finally에서 discard 안 함.
+        # (LIVE pending은 체결 콜백이 정리해야 하므로 유지)
+        _keep_in_progress = False
+        try:
+            if OPERATION_MODE == "MOCK":
+                # 100% 즉시 매수 (분할 매수 비활성 — 자본 효율 극대화)
                 logger.info(
-                    "[자동매매] %s 매수 접수 %d주 @%s (금액 %s)",
+                    "[가상매매] %s 매수 체결 %d주 @%s (금액 %s)",
                     name, quantity, f"{price:,}", f"{amount:,}",
+                )
+                from trading.trade_journal import record_trade
+                record_trade(
+                    ticker=ticker, name=name, side="buy",
+                    quantity=quantity, price=price,
+                    reason=", ".join(signal.reasons[:2]),
+                    strategy=signal.strategy_name if hasattr(signal, "strategy_name") else "",
+                    mock=True,
+                    exec_strength=float(stock.get("exec_strength", 0)),
+                    ai_decision=ai_decision,
                 )
                 notifier.send_to_users(
                     [get_admin_id()],
-                    f"🛒 [자동매매] {name} 매수 접수\n"
-                    f"수량: {quantity}주 / 가격: {price:,}원\n"
-                    f"사유: {', '.join(signal.reasons[:3])}"
+                    f"🛒 [가상 매수 체결] {name} ({ticker})\n"
+                    f"💰 수량: {quantity}주 / 가격: {price:,}원\n"
+                    f"💵 투자금액: {amount:,}원\n"
+                    f"📊 사유: {', '.join(signal.reasons[:3])}\n"
+                    f"⚠️ 모의투자"
                     + CMD_FOOTER,
                 )
+                # Determine strategy mode from regime (EOD liquidation용 — legacy)
+                try:
+                    from strategies.regime_engine import get_regime_engine
+                    _regime = get_regime_engine().state.value
+                    _strategy_tag = "trend_following" if _regime in ("swing", "defense", "cash") else "vb"
+                except Exception:
+                    _strategy_tag = ""
+
+                # EOD 청산 판정은 TRADING_STYLE 기반 intent로 결정 (레짐 전환에 불변).
+                # intent="daytrading" → EOD 청산, intent="swing" → 보유 지속.
+                # 매수 시점의 TRADING_STYLE을 고정 기록.
+                from alerts._state import get_trading_intent as _get_intent
+                _intent = _get_intent()
+
+                # rule_name: 위기MR 평균회귀 전략일 땐 "위기MR" 태그를 포함시켜
+                # EOD 청산 / 전용 청산 로직이 식별할 수 있게 함.
+                _underlying = (getattr(signal, "underlying_strategy", "") or "").lower()
+                _strength_name = signal.strength.name if hasattr(signal, "strength") else ""
+                if "crisis" in _underlying or "meanrev" in _underlying:
+                    _rule_name = f"자동매매_위기MR_{_strength_name}" if _strength_name else "자동매매_위기MR"
+                else:
+                    _rule_name = f"자동매매_{_strength_name}" if _strength_name else "자동매매"
+
+                positions = load_auto_positions()
+                positions[ticker] = {
+                    "name": name,
+                    "qty": quantity,
+                    "buy_price": price,
+                    "buy_amount": amount,
+                    "buy_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "bought_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                    "high_price": price,
+                    "trailing_activated": False,
+                    "rule_name": _rule_name,
+                    "mock": True,
+                    "strategy": _strategy_tag,  # legacy 태그 (호환용)
+                    "intent": _intent,          # 새 기준 — EOD 청산 판정용
+                }
+                save_auto_positions(positions)
+                # MOCK은 즉시 체결 처리 완료 → discard (finally에서 처리)
             else:
+                # LIVE rule_name: MOCK과 동일한 규칙 — 위기MR이면 전용 태깅
+                _underlying_live = (getattr(signal, "underlying_strategy", "") or "").lower()
+                _strength_live = signal.strength.name if hasattr(signal, "strength") else ""
+                if "crisis" in _underlying_live or "meanrev" in _underlying_live:
+                    _rn_live = f"자동매매_위기MR_{_strength_live}" if _strength_live else "자동매매_위기MR"
+                else:
+                    _rn_live = f"자동매매_{_strength_live}" if _strength_live else "자동매매"
+                buy_result = execute_buy(ticker, name, quantity, price,
+                                         rule_name=_rn_live)
+                if buy_result.get("status") == "pending":
+                    logger.info(
+                        "[자동매매] %s 매수 접수 %d주 @%s (금액 %s)",
+                        name, quantity, f"{price:,}", f"{amount:,}",
+                    )
+                    notifier.send_to_users(
+                        [get_admin_id()],
+                        f"🛒 [자동매매] {name} 매수 접수\n"
+                        f"수량: {quantity}주 / 가격: {price:,}원\n"
+                        f"사유: {', '.join(signal.reasons[:3])}"
+                        + CMD_FOOTER,
+                    )
+                    # LIVE pending: 체결 콜백이 _buy_in_progress 정리해야 함
+                    _keep_in_progress = True
+                # pending 아니면(실패/거부) finally에서 discard
+        finally:
+            if not _keep_in_progress:
                 _buy_in_progress.discard(ticker)
 
     # ── 매도 ──
