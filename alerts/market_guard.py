@@ -61,13 +61,14 @@ def _configure(max_monthly_loss: int, max_consec_stoploss: int, max_daily_loss: 
 # 손실 기록
 # ---------------------------------------------------------------------------
 
-def record_loss_and_stoploss(loss_amount: int) -> None:
+def record_loss_and_stoploss(loss_amount: int, mock: bool = False) -> None:
     """손실 기록 + 연속손절 카운터 증가.
 
     Args:
         loss_amount: 손실 금액 (양수)
+        mock: True면 MOCK 전용 파일(monthly_loss_mock.json)에 기록. LIVE 방어 한도에 영향 없음.
     """
-    data = load_monthly_loss()
+    data = load_monthly_loss(mock=mock)
     data["loss"] = data.get("loss", 0) + abs(loss_amount)
     data["consec_stoploss"] = data.get("consec_stoploss", 0) + 1
 
@@ -77,44 +78,59 @@ def record_loss_and_stoploss(loss_amount: int) -> None:
     weekly[week_key] = weekly.get(week_key, 0) + abs(loss_amount)
     data["weekly_loss"] = weekly
 
-    save_monthly_loss(data)
+    save_monthly_loss(data, mock=mock)
     logger.info(
-        "손실 기록: %d원 (월누적: %d원, 연속손절: %d회)",
+        "손실 기록: %d원 (월누적: %d원, 연속손절: %d회)%s",
         loss_amount,
         data["loss"],
         data["consec_stoploss"],
+        " [MOCK]" if mock else "",
     )
 
 
-def reset_consec_stoploss() -> None:
-    """연속손절 카운터 리셋 (익절 시)."""
-    data = load_monthly_loss()
+def reset_consec_stoploss(mock: bool = False) -> None:
+    """연속손절 카운터 리셋 (익절 시).
+
+    Args:
+        mock: True면 MOCK 전용 파일에서 리셋.
+    """
+    data = load_monthly_loss(mock=mock)
     if data.get("consec_stoploss", 0) > 0:
         data["consec_stoploss"] = 0
-        save_monthly_loss(data)
-        logger.info("연속손절 카운터 리셋 (익절)")
+        save_monthly_loss(data, mock=mock)
+        logger.info("연속손절 카운터 리셋 (익절)%s", " [MOCK]" if mock else "")
 
 
-def is_monthly_loss_exceeded() -> bool:
-    """월간 손실 한도 초과 여부."""
-    data = load_monthly_loss()
+def is_monthly_loss_exceeded(mock: bool = False) -> bool:
+    """월간 손실 한도 초과 여부.
+
+    Args:
+        mock: True면 MOCK 누적치 기준 판단. LIVE 매매 차단과 무관.
+    """
+    data = load_monthly_loss(mock=mock)
     exceeded = data.get("loss", 0) >= MAX_MONTHLY_LOSS
     if exceeded:
         logger.warning(
-            "월간 손실 한도 초과: %d / %d",
+            "월간 손실 한도 초과%s: %d / %d",
+            " [MOCK]" if mock else "",
             data.get("loss", 0),
             MAX_MONTHLY_LOSS,
         )
     return exceeded
 
 
-def is_consec_stoploss_exceeded() -> bool:
-    """연속 손절 한도 초과 여부."""
-    data = load_monthly_loss()
+def is_consec_stoploss_exceeded(mock: bool = False) -> bool:
+    """연속 손절 한도 초과 여부.
+
+    Args:
+        mock: True면 MOCK 누적치 기준 판단.
+    """
+    data = load_monthly_loss(mock=mock)
     exceeded = data.get("consec_stoploss", 0) >= MAX_CONSEC_STOPLOSS
     if exceeded:
         logger.warning(
-            "연속손절 한도 초과: %d / %d",
+            "연속손절 한도 초과%s: %d / %d",
+            " [MOCK]" if mock else "",
             data.get("consec_stoploss", 0),
             MAX_CONSEC_STOPLOSS,
         )

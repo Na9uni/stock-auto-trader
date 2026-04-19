@@ -91,26 +91,26 @@ class AIAnalyzer:
         if orderbook:
             orderbook_info = f"\n호가창: {json.dumps(orderbook, ensure_ascii=False)}"
 
-        prompt = f"""당신은 한국 주식 단타 자동매매 AI입니다.
-초등학생도 이해할 수 있게 쉬운 한국어로 답변하세요. 전문 용어를 쓰지 마세요.
-이 신호는 이미 RSI, MACD, 볼린저밴드, 이동평균, 거래량 등 10개 기술적 조건에서 STRONG(6점 이상) 판정을 받았습니다.
-기술적 분석은 이미 완료되었으므로, 당신은 치명적 리스크가 있는 경우에만 [관망]을 판단하세요.
+        # vol_desc/exec_desc는 위(66~84줄)에서 이미 계산됨.
+        # 프롬프트는 son-dev의 초보자 친화 버전 채택 (아빠 테스트 피드백 반영).
+        # master의 "초등학생도 이해할 수 있게" 지시는 아래 프롬프트에 이미 반영됨.
 
-종목: {name} ({ticker})
-현재가: {price:,}원 ({change_rate:+.1f}%)
-RSI: {rsi:.1f}
-MACD: {macd_cross or '없음'}
-거래량: {vol_desc}
+        prompt = f"""너는 주식 초보에게 사도 될지 말해주는 도우미야.
+이 종목은 자동 분석에서 "살 만하다" 점수를 받았어. 근데 진짜 사도 괜찮은지 한번 더 확인해줘.
+
+종목: {name}
+지금 가격: {price:,}원 (오늘 {change_rate:+.1f}%)
+거래 상황: {vol_desc}
 매수세: {exec_desc}
-매수 신호 사유: {', '.join(signal_reasons)}
-경고: {', '.join(warnings or [])}{candle_info}{orderbook_info}
+신호 이유: {', '.join(signal_reasons)}
+주의사항: {', '.join(warnings or ['없음'])}
 
-판단 기준:
-- [매수]: 신호가 유효하고 치명적 리스크 없음 (기본 판단)
-- [관망]: 급락 직후 반등 미확인, 거래량 극히 부족, 상한가 근접 등 명백한 위험 시에만
-- [매도]: 하락 추세 명확
+[매수] = 사도 됨, [관망] = 지금은 기다려, [매도] = 팔아야 함
 
-2줄 이내로 핵심만 분석하고, 반드시 첫 줄에 [매수], [관망], [매도] 중 하나를 표시하세요."""
+규칙:
+- 첫 줄에 [매수], [관망], [매도] 중 하나만
+- 둘째 줄에 이유를 한 문장으로. 초등학생도 알아듣게 쉽게
+- 전문 용어 절대 쓰지 마"""
 
         try:
             text = self._call_claude(prompt, max_tokens=300)

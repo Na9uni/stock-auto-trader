@@ -103,6 +103,16 @@
             "type": "command",
             "command": "bash -c 'CHANGED=$(git diff --name-only HEAD 2>/dev/null); if echo \"$CHANGED\" | grep -qE \"strategies/|alerts/signal|alerts/trade_executor|alerts/market_guard|alerts/position_manager|alerts/performance_snapshot\"; then echo \"[STOP CHECK] 전략/실행/손실방어 파일 변경 감지. 완료 전 확인:\\n1. Auto Review Protocol 결과 보고 완료?\\n2. 백테스트 실행 또는 계획 안내?\\n3. 도메인 리뷰(trading-review 스킬 기준) 수행?\\n4. 영향 분석(impact-check) 수행?\\n5. 손실 방어 로직 완화 없음 확인?\\n미완료 시 먼저 수행.\" >&2; fi'",
             "description": "매매 핵심 경로 변경 후 리뷰 완료 체크포인트"
+          },
+          {
+            "type": "command",
+            "command": "bash -c 'CHANGED=$(git diff --name-only HEAD 2>/dev/null); if echo \"$CHANGED\" | grep -qE \"kiwoom/|alerts/|strategies/|config/trading_config|ai/ai_analyzer\"; then python -c \"import json; d=json.load(open(\\\"data/kiwoom_data.json\\\",encoding=\\\"utf-8\\\")); stocks=d.get(\\\"stocks\\\",{}); zero_pv=sum(1 for s in stocks.values() if s.get(\\\"prev_volume\\\",0)==0); zero_1d=sum(1 for s in stocks.values() if len(s.get(\\\"candles_1d\\\",[]))<2); total=len(stocks); assert total>0, \\\"kiwoom_data.json 비어있음\\\"; pct_pv=zero_pv*100//total; pct_1d=zero_1d*100//total; threshold_pv = 80 if total > 50 else 50; threshold_1d = 80 if total > 50 else 50; print(f\\\"[데이터 무결성] 전체 {total}종목: prev_volume=0 {zero_pv}개({pct_pv}%), candles_1d부족 {zero_1d}개({pct_1d}%) | 차단기준 prev_volume>{threshold_pv}% 또는 1d>{threshold_1d}%\\\"); exit(2 if pct_pv > threshold_pv or pct_1d > threshold_1d else 0)\" 2>&1 >&2 || exit 2; fi'",
+            "description": "수집기/신호/전략 수정 시 실제 데이터 무결성 검증 (차단). 100+ 종목 환경에선 로테이션 진행 중 임계값 완화"
+          },
+          {
+            "type": "command",
+            "command": "bash -c 'CHANGED=$(git diff --name-only HEAD 2>/dev/null); if echo \"$CHANGED\" | grep -qE \"trade_executor|signal_runner|kiwoom_collector\"; then echo \"[런타임 검증 필수] 아래 중 하나 이상 제시했는지 확인:\\n- 실제 로그(logs/*)에서 수정한 로직 실행 흔적\\n- data/kiwoom_data.json 필드 직접 검증\\n- 프로그램 재시작 후 텔레그램/로그 확인\\n정적 검사(py_compile/pytest)만으로 완료 선언 금지.\" >&2; fi'",
+            "description": "실행 경로 파일 수정 시 런타임 증거 제시 강제 알림"
           }
         ]
       }
@@ -112,8 +122,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'MODE=$(grep -E \"^OPERATION_MODE=\" .env 2>/dev/null | cut -d= -f2); STYLE=$(grep -E \"^TRADING_STYLE=\" .env 2>/dev/null | cut -d= -f2); BRANCH=$(git branch --show-current 2>/dev/null); if [ -z \"$MODE\" ]; then echo \"[WARN] .env OPERATION_MODE 미설정\" >&2; else echo \"[SESSION] 모드=$MODE | 스타일=$STYLE | 브랜치=$BRANCH\" >&2; fi; if [ ! -d data ]; then echo \"[WARN] data/ 디렉토리 없음 — 초기 실행 시 자동 생성되지만 확인 필요\" >&2; fi; if [ \"$MODE\" = \"LIVE\" ]; then echo \"[CRITICAL] LIVE 모드! user_dad_retirement_stake.md 체크리스트 재확인\" >&2; fi'",
-            "description": "세션 시작 시 환경 점검 (모드/스타일/브랜치/LIVE 경고)"
+            "command": "python scripts/session_start_check.py",
+            "description": "세션 시작 시 환경 점검 (.env, 매크로, 수집기, 레짐, 브랜치). 스크립트는 scripts/session_start_check.py 참조."
           }
         ]
       }
