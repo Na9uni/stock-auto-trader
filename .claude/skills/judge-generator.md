@@ -122,6 +122,41 @@ GOAL: 2022 하락장 -8% 이내 + 2년 수익 +30% 이상
    - C) 전략 자체 재검토 (이 종목엔 부적합)
 4. 사용자 결정 대기
 
+## 실전 호출 예시
+
+### VB K값 최적화 (단일 종목)
+```bash
+PYTHONIOENCODING=utf-8 python -m backtest.k_optimizer
+# 종목별 K값 그리드서치. 출력: 각 종목의 Sharpe/PF/MDD 최적값
+```
+
+### Walk-Forward 자동 재최적화 (전 종목)
+```bash
+PYTHONIOENCODING=utf-8 python -m backtest.walk_forward_auto
+# in/out sample 분리 → 과적합 경고 + train vs test Sharpe 비교
+```
+
+### VB 필터 A/B 비교 (2026-04-17 신규)
+```bash
+PYTHONIOENCODING=utf-8 python -m backtest.compare_vb_filters
+# 기존 / 엄격 필터 / 완화 필터 3버전 동시 비교
+# 기간별(2년/2022 하락장/2023 회복장) 승률·Sharpe·MDD 일괄 출력
+```
+
+### PD 루프 (Judge-Generator 수동 실행 패턴)
+```
+1. Bash 도구로 위 스크립트 N회 실행 (각 실행마다 파라미터 변경)
+2. 결과 파싱 → 통과 기준 대조 (Sharpe > 0.5 등)
+3. FAIL이면 다음 파라미터 조합 결정 (grid/휴리스틱)
+4. 1~3 반복 (MAX_ITER=5 한도 엄수)
+5. 통과 시 또는 MAX_ITER 도달 시 사용자 보고 (시도 이력 포함)
+```
+
+### 신규 도구 추가 시 (grid_search 같은)
+- 새 백테스터 추가 전 `backtest/CLAUDE.md` 참조
+- `BacktesterV2` 확장 or 별도 스크립트 둘 다 가능
+- 결과는 표 형태(수익률/거래수/승률/Sharpe/MDD)로 통일
+
 ## 연계 스킬
 
 - `expert-meeting`: 최적 결과를 4인 회의로 검증

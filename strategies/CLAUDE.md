@@ -2,6 +2,13 @@
 
 **역할**: `MarketContext` 입력 → `SignalResult` 출력. Pure 함수에 가깝게.
 
+## 이 파일의 원칙
+
+- 80줄 이하 유지 (상위 CLAUDE.md와 동일)
+- 디렉토리별 즉시 필요한 규칙만
+- 상세 레퍼런스는 `.claude/skills/*` + `docs/ARCHITECTURE.md` 참조
+- 파일 목록/코드 스니펫 금지 (코드 직접 읽기)
+
 ## 베이스 (반드시 준수)
 
 - 모든 전략은 `strategies/base.py`의 `Strategy` Protocol 구현
