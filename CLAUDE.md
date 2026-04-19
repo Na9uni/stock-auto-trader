@@ -98,6 +98,24 @@ python -m backtest.backtester_v2
 - 전략 수정 시: base.py → 해당 전략 → auto_strategy.py 순서로 읽기
 - 파일 탐색 시 `head -50`으로 구조 파악 후 필요 부분만 정밀 읽기
 - 스킬은 필요한 것만 1~2개씩 로드. domain-knowledge + trading-review + expert-meeting 동시 로드 금지
+- MCP 도구 vs Skill: 같은 기능이면 Skill 우선 (비용 30배 경제적)
+
+## Subagent Usage
+
+서브에이전트 3유형을 목적별로 구분해 사용. 무분별한 병렬 호출은 토큰 낭비.
+
+- **Explore** (Haiku, read-only): 파일 검색·구조 파악·간단한 감사. 저비용 우선.
+- **general-purpose** (부모 모델): 복잡한 감사, 독립 검증, 크로스 레이어 분석.
+- **Plan**: 구현 전 설계·영향 범위 분석.
+- 공통 제약:
+  - 출력은 판정 + 근거만 (800~1,200자)
+  - 읽을 파일 범위 명시적으로 전달
+  - 대화 편향 제거 목적의 cold review는 "이전 대화 중복 금지" 명시
+  - 동일 작업에 여러 유형 동시 호출 금지 (순차 또는 단일)
+- 매매 로직/전략 변경 시 감사 권장:
+  - 소규모 변경 → `expert-solo` 스킬 1인 소환
+  - 중규모 이상 → `expert-meeting` 스킬 4인 병렬 검증
+  - 대규모 LIVE 전환 결정 전 → general-purpose cold review 2회 이상
 
 ## Rules
 
