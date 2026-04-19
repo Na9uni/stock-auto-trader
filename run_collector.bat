@@ -6,5 +6,5 @@ echo   Kiwoom Data Collector (32-bit Python)
 echo ============================================
 echo.
 cd /d "%~dp0"
-C:\Users\Administrator\AppData\Local\Programs\Python\Python311-32\python.exe -m kiwoom.kiwoom_collector
+py -3.11-32 -m kiwoom.kiwoom_collector
 pause
