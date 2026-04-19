@@ -252,6 +252,88 @@ def generate_report(df: pd.DataFrame, output_path: Path) -> None:
 # 6. 메인
 # ─────────────────────────────────────────────────────────────
 
+def sensitivity_analysis(df: pd.DataFrame, base_params: dict) -> None:
+    """파라미터 민감도 분석: 기준값 ±20%에서 수익률 변화 기울기 측정.
+
+    변화량이 크면 그 파라미터는 "불안정" (과적합 위험 ↑).
+    변화량이 작으면 그 파라미터는 "안정" (신뢰 가능 ↑).
+    """
+    print("\n" + "=" * 85)
+    print("  🎯 파라미터 민감도 분석 (기준값 ±20%)")
+    print(f"  기준: K={base_params['vb_k']} / 손절={base_params['stoploss_pct']}% / "
+          f"트레일={base_params['trailing_activate_pct']}%→{base_params['trailing_stop_pct']}%")
+    print("=" * 85)
+
+    param_cols = list(base_params.keys())
+    print(f"\n  {'파라미터':<24} {'기준값':>8} {'-20%':>8} {'-10%':>8} {'+10%':>8} {'+20%':>8} {'민감도':>8} {'판정':<8}")
+    print("  " + "-" * 90)
+
+    base_stats = df[df[param_cols].eq(pd.Series(base_params)).all(axis=1)]
+    if base_stats.empty:
+        print("  ⚠️ 기준값 조합이 grid_search 결과에 없음")
+        return
+    base_score = float(base_stats["score"].mean())
+
+    for col in param_cols:
+        base_val = base_params[col]
+        # 각 -20/-10/+10/+20% 대응 값 찾기 (이웃 값)
+        unique_vals = sorted(df[col].unique())
+        if base_val not in unique_vals:
+            continue
+        idx = unique_vals.index(base_val)
+
+        # 평균 점수로 민감도 계산
+        def get_score_at(val):
+            sub = df[df[col] == val]
+            if sub.empty:
+                return None
+            return float(sub["score"].mean())
+
+        # 이웃 값들 (최대 ±2 슬롯)
+        vals_around = []
+        for off in [-2, -1, 0, 1, 2]:
+            target_idx = idx + off
+            if 0 <= target_idx < len(unique_vals):
+                val = unique_vals[target_idx]
+                score = get_score_at(val)
+                vals_around.append((val, score))
+
+        if len(vals_around) < 3:
+            continue
+
+        # 민감도 = (최고점수 - 최저점수) / 기준점수
+        scores = [s for _, s in vals_around if s is not None]
+        if not scores:
+            continue
+        sensitivity = (max(scores) - min(scores)) / base_score * 100 if base_score > 0 else 0
+
+        # 판정
+        if sensitivity < 5:
+            verdict = "안정 ✅"
+        elif sensitivity < 15:
+            verdict = "보통 🟡"
+        else:
+            verdict = "민감 🔴"
+
+        # 출력
+        line = f"  {col:<24} {base_val:>8}"
+        for val, score in vals_around:
+            if val == base_val:
+                continue
+            if score is None:
+                line += f" {'-':>8}"
+            else:
+                line += f" {score:>7.1f}"
+        line += f" {sensitivity:>7.1f}% {verdict}"
+        print(line)
+
+    print("\n  💡 판정 기준:")
+    print("     안정 (<5%)   — 기준값에서 살짝 바꿔도 결과 비슷 → 신뢰 가능")
+    print("     보통 (5~15%) — 조정 여지 있음, 튜닝 시 확인")
+    print("     민감 (>15%)  — 파라미터 조금만 바꿔도 결과 크게 달라짐 → 과적합 의심")
+    print("=" * 85)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tickers", nargs="+", default=None,
@@ -260,6 +342,8 @@ def main() -> None:
                         help="기간 (yfinance period, 기본 3y)")
     parser.add_argument("--small", action="store_true",
                         help="소규모 그리드 (빠른 테스트)")
+    parser.add_argument("--sensitivity", action="store_true",
+                        help="민감도 분석 실행 (기존 결과 + ±20% 주변 비교)")
     args = parser.parse_args()
 
     grid = PARAM_GRID_SMALL if args.small else PARAM_GRID_FULL
@@ -283,6 +367,17 @@ def main() -> None:
     generate_report(df, txt_path)
 
     print(f"\n📁 저장: {csv_path.name} / {txt_path.name}")
+
+    # 9-C 감도 분석 (옵션)
+    if args.sensitivity:
+        base_config = TradingConfig.from_env()
+        base_params = {
+            "vb_k": base_config.vb_k,
+            "stoploss_pct": base_config.stoploss_pct,
+            "trailing_activate_pct": base_config.trailing_activate_pct,
+            "trailing_stop_pct": base_config.trailing_stop_pct,
+        }
+        sensitivity_analysis(df, base_params)
 
 
 if __name__ == "__main__":
