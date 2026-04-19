@@ -37,6 +37,26 @@
             "description": "손실 방어 핵심 파일 + .env 수정 사전 차단"
           }
         ]
+      },
+      {
+        "matcher": "Bash(git commit*)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'python -c \"from strategies.combo_strategy import ComboStrategy; from strategies.auto_strategy import AutoStrategy; from strategies.vb_strategy import VBStrategy; from strategies.trend_strategy import TrendStrategy; from config.trading_config import TradingConfig; from alerts.analysis_scheduler import run_scheduler; from alerts import trade_executor, market_guard, position_manager, performance_snapshot, telegram_notifier\" 2>&1 || exit 2'",
+            "description": "커밋 전 핵심 모듈 임포트 검증 (전략 + 실행 + 손실방어)"
+          },
+          {
+            "type": "command",
+            "command": "bash -c 'if git diff --cached --name-only | grep -q \"\\.env$\"; then echo \"[BLOCK] .env 커밋 차단\" >&2; exit 2; fi'",
+            "description": "커밋 전 .env 차단"
+          },
+          {
+            "type": "command",
+            "command": "bash -c 'if git diff --cached --name-only | grep -qE \"strategies/|alerts/signal|alerts/trade_executor|alerts/market_guard|alerts/position_manager|alerts/performance_snapshot\"; then python -m pytest tests/ -q --tb=short 2>&1 || exit 2; fi'",
+            "description": "커밋 전 매매 핵심 경로 전체 pytest"
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -64,21 +84,9 @@
             "description": "_state.py 영향 범위 경고"
           }
         ]
-      }
-    ],
-    "Stop": [
+      },
       {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash -c 'CHANGED=$(git diff --name-only HEAD 2>/dev/null); if echo \"$CHANGED\" | grep -qE \"strategies/|alerts/signal|alerts/trade_executor|alerts/market_guard|alerts/position_manager|alerts/performance_snapshot\"; then echo \"[STOP CHECK] 전략/실행/손실방어 파일 변경 감지. 완료 전 확인:\\n1. Auto Review Protocol 결과 보고 완료?\\n2. 백테스트 실행 또는 계획 안내?\\n3. 도메인 리뷰(trading-review 스킬 기준) 수행?\\n4. 영향 분석(impact-check) 수행?\\n5. 손실 방어 로직 완화 없음 확인?\\n미완료 시 먼저 수행.\" >&2; fi'",
-            "description": "매매 핵심 경로 변경 후 리뷰 완료 체크포인트"
-          }
-        ]
-      }
-    ],
-    "PostCommit": [
-      {
+        "matcher": "Bash(git commit*)",
         "hooks": [
           {
             "type": "command",
@@ -88,23 +96,13 @@
         ]
       }
     ],
-    "PreCommit": [
+    "Stop": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'python -c \"from strategies.combo_strategy import ComboStrategy; from strategies.auto_strategy import AutoStrategy; from strategies.vb_strategy import VBStrategy; from strategies.trend_strategy import TrendStrategy; from config.trading_config import TradingConfig; from alerts.analysis_scheduler import run_scheduler; from alerts import trade_executor, market_guard, position_manager, performance_snapshot, telegram_notifier\" 2>&1 || exit 2'",
-            "description": "핵심 모듈 임포트 검증 (전략 + 실행 + 손실방어)"
-          },
-          {
-            "type": "command",
-            "command": "bash -c 'if git diff --cached --name-only | grep -q \"\\.env$\"; then echo \"[BLOCK] .env 커밋 차단\" >&2; exit 2; fi'",
-            "description": ".env 커밋 차단"
-          },
-          {
-            "type": "command",
-            "command": "bash -c 'if git diff --cached --name-only | grep -qE \"strategies/|alerts/signal|alerts/trade_executor|alerts/market_guard|alerts/position_manager|alerts/performance_snapshot\"; then python -m pytest tests/ -q --tb=short 2>&1 || exit 2; fi'",
-            "description": "매매 핵심 경로 커밋 전 전체 테스트"
+            "command": "bash -c 'CHANGED=$(git diff --name-only HEAD 2>/dev/null); if echo \"$CHANGED\" | grep -qE \"strategies/|alerts/signal|alerts/trade_executor|alerts/market_guard|alerts/position_manager|alerts/performance_snapshot\"; then echo \"[STOP CHECK] 전략/실행/손실방어 파일 변경 감지. 완료 전 확인:\\n1. Auto Review Protocol 결과 보고 완료?\\n2. 백테스트 실행 또는 계획 안내?\\n3. 도메인 리뷰(trading-review 스킬 기준) 수행?\\n4. 영향 분석(impact-check) 수행?\\n5. 손실 방어 로직 완화 없음 확인?\\n미완료 시 먼저 수행.\" >&2; fi'",
+            "description": "매매 핵심 경로 변경 후 리뷰 완료 체크포인트"
           }
         ]
       }
