@@ -12,6 +12,8 @@ from typing import Any
 import requests
 from dotenv import load_dotenv
 
+from alerts.telegram_notifier import mask_bot_token
+
 ROOT = Path(__file__).parent.parent
 load_dotenv(ROOT / ".env")
 logger = logging.getLogger("stock_analysis")
@@ -85,7 +87,7 @@ def _polling_loop() -> None:
                 offset = update_id + 1
                 _process_update(update)
         except Exception as exc:
-            logger.error("polling_loop 예외: %s", exc)
+            logger.error("polling_loop 예외: %s", mask_bot_token(exc))
             time.sleep(_POLLING_INTERVAL * 5)
         else:
             time.sleep(_POLLING_INTERVAL)
@@ -125,7 +127,7 @@ def _get_updates(offset: int | None) -> list[dict]:
             time.sleep(30)
     except requests.RequestException as exc:
         if _last_error_code != -1:
-            logger.error("getUpdates 예외: %s", exc)
+            logger.error("getUpdates 예외: %s", mask_bot_token(exc))
             _last_error_code = -1
     return []
 
@@ -490,7 +492,7 @@ def _send(chat_id: str, text: str) -> bool:
         logger.error("_send 실패 chat_id=%s status=%s", chat_id, resp.status_code)
         return False
     except requests.RequestException as exc:
-        logger.error("_send 예외 chat_id=%s error=%s", chat_id, exc)
+        logger.error("_send 예외 chat_id=%s error=%s", chat_id, mask_bot_token(exc))
         return False
 
 
@@ -508,11 +510,18 @@ def _read_json(path: Path) -> dict | None:
 
 
 def _write_json(path: Path, data: dict) -> bool:
-    """JSON 파일 쓰기. 실패 시 False 반환."""
+    """JSON 파일 atomic 쓰기 (tempfile → os.replace).
+
+    main thread(save_auto_positions)와 commander 스레드가 동일 파일을
+    동시에 쓸 때 부분 쓰기/빈 파일 위험 방지. CLAUDE.md "atomic write" 원칙 준수.
+    """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        import os as _os
+        _os.replace(str(tmp), str(path))
         return True
     except OSError as exc:
         logger.error("JSON 쓰기 실패 %s: %s", path, exc)

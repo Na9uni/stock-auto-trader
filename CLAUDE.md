@@ -52,6 +52,15 @@ python -m backtest.backtester_v2    # 백테스트 (전략 변경 시 필수)
 - 세션 교체: 작업 요약 → 변경 파일 → 미완료 TODO 정리하여 다음 세션 첫 메시지로
 - 파일 탐색: `head -50` → 필요 부분 정밀 읽기 (cat 금지)
 - 스킬 동시 로드 제한: domain-knowledge + trading-review + expert-meeting 동시 금지
+- MCP 도구 vs Skill: 같은 기능이면 Skill 우선 (비용 30배 경제적)
+
+## Subagent Usage
+
+- **Explore** (Haiku, read-only): 검색·구조 파악·간단한 감사
+- **general-purpose** (부모 모델): 복잡한 감사·독립 검증
+- **Plan**: 구현 전 설계
+- 출력 800~1,200자. 동일 작업 동시 호출 금지
+- 매매 변경 시 감사: 소규모 `expert-solo`, 중규모+ `expert-meeting` 4인, LIVE 전환 전 cold review 2회+
 
 ## Rules (절대)
 
