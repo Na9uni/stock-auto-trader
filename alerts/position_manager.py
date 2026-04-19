@@ -283,7 +283,7 @@ def check_auto_positions() -> None:
                 from alerts.trade_executor import OPERATION_MODE
                 if OPERATION_MODE == "MOCK":
                     # 평균 단가 계산: (1차 qty*1차가 + 2차 qty*현재가) / 총 qty
-                    # 주의: qty 갱신 전에 계산해야 함 (이전 코드는 순서 의존으로 난해)
+                    # master 채택 — 명시적 변수로 순서 의존 제거 (son-dev 원본은 qty 역산 난해)
                     first_qty = int(pos.get("qty", 0))
                     first_price = int(pos["buy_price"])
                     new_qty = first_qty + split_remaining
@@ -292,9 +292,22 @@ def check_auto_positions() -> None:
                     )
                     pos["qty"] = new_qty
                     pos["buy_price"] = new_avg_price
+                    pos["buy_amount"] = new_avg_price * new_qty  # son-dev 추가 — 대시보드/리포트 정합성
                     pos.pop("split_remaining", None)
                     pos.pop("split_price", None)
                     logger.info("[분할매수 2차] %s +%d주 @%s → 총 %d주", name, split_remaining, f"{current_price:,}", pos["qty"])
+                    # 매매일지 기록 (2차 매수분)
+                    try:
+                        from trading.trade_journal import record_trade
+                        record_trade(
+                            ticker=ticker, name=name, side="buy",
+                            quantity=split_remaining, price=current_price,
+                            reason="분할매수 2차 (40%)",
+                            strategy=pos.get("strategy", ""),
+                            mock=True,
+                        )
+                    except Exception as e:
+                        logger.warning("[분할매수 2차] 매매일지 기록 실패: %s", e)
                     try:
                         notifier.send_to_users(
                             [get_admin_id()],
@@ -518,10 +531,10 @@ def check_auto_positions() -> None:
             )
             if pnl < 0:
                 from alerts.market_guard import record_loss_and_stoploss
-                record_loss_and_stoploss(abs(pnl))
+                record_loss_and_stoploss(abs(pnl), mock=True)
             else:
                 from alerts.market_guard import reset_consec_stoploss
-                reset_consec_stoploss()
+                reset_consec_stoploss(mock=True)
             try:
                 from trading.trade_journal import record_trade
                 record_trade(ticker=ticker, name=name, side="sell", quantity=sell_qty,

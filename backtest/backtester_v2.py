@@ -29,20 +29,33 @@ class BacktesterV2:
         self._exit = ExitManager(self._config)
         self._indicators = TechnicalIndicators()
 
-    def run_vb(self, ticker: str, df: pd.DataFrame) -> dict:
+    def run_vb(
+        self,
+        ticker: str,
+        df: pd.DataFrame,
+        use_high_point_filters: bool = False,
+        filter_ma10_deviation_max: float = 0.03,
+        filter_volume_ratio_min: float = 1.2,
+        filter_rsi_max: float = 70.0,
+    ) -> dict:
         """변동성 돌파 전략 백테스트.
 
         실전과 동일한 비용 모델 적용:
         - 매수: 목표가 + 보호마진
         - 매도: 익일 시가 - 보호마진 OR 장중 손절/트레일링
+
+        Args:
+            use_high_point_filters: True면 고점 매수 회피 필터 적용
+            filter_ma10_deviation_max: MA10 이격도 허용 최대치 (기본 3%)
+            filter_volume_ratio_min: 전일 거래량 vs 5일 평균 최소 배수 (기본 1.2)
+            filter_rsi_max: 전일 RSI 허용 최대치 (기본 70, 과매수 차단)
         """
-        # TODO: 현재 VB만 테스트. combo 거부권(score <= -3) 효과는 미반영.
-        # 실전은 auto_strategy에서 combo+trend 조합이므로 백테스트 결과와 괴리 가능.
         df = df.copy().reset_index(drop=True)
         df["range"] = df["high"] - df["low"]
         df["ma10"] = df["close"].rolling(10).mean()
         df["ma20"] = df["close"].rolling(20).mean()
         df["ma60"] = df["close"].rolling(60).mean()
+        df["vol_avg5"] = df["volume"].rolling(5).mean()
 
         # RSI 계산 (과매수 트레일링용)
         df_ind = self._indicators.get_all_indicators(df)
@@ -158,6 +171,29 @@ class BacktesterV2:
                 if prev_range < today_open * 0.005:
                     equity_curve.append((today_date, cash))
                     continue
+
+                # ── 고점 매수 회피 필터 (옵션, 임계값 파라미터화) ──
+                if use_high_point_filters:
+                    # 1. MA10 이격도
+                    if prev_ma10 > 0 and (today_open - prev_ma10) / prev_ma10 > filter_ma10_deviation_max:
+                        equity_curve.append((today_date, cash))
+                        continue
+                    # 2. 돌파 거래량
+                    prev_vol = float(prev.get("volume", 0)) if not pd.isna(prev.get("volume", 0)) else 0
+                    prev_vol_avg5 = float(prev.get("vol_avg5", 0)) if not pd.isna(prev.get("vol_avg5", 0)) else 0
+                    if prev_vol_avg5 > 0 and prev_vol < prev_vol_avg5 * filter_volume_ratio_min:
+                        equity_curve.append((today_date, cash))
+                        continue
+                    # 3. RSI 과매수 차단
+                    prev_rsi = 50.0
+                    if i - 1 < len(df_ind):
+                        r = df_ind.iloc[i - 1].get("rsi", 50.0)
+                        if not pd.isna(r):
+                            prev_rsi = float(r)
+                    if prev_rsi >= filter_rsi_max:
+                        equity_curve.append((today_date, cash))
+                        continue
+
                 # 목표가 돌파
                 if today_high >= target:
                     # 갭업 시 시가가 목표가 위면 시가 기준 체결 (목표가 이하 매수 불가)

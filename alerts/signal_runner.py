@@ -16,7 +16,7 @@ from datetime import datetime
 import pandas as pd
 
 from alerts.telegram_notifier import TelegramNotifier
-from config.whitelist import is_whitelisted
+from config.whitelist import is_whitelisted, is_watched
 from strategies.base import MarketContext, SignalResult, SignalType, SignalStrength
 
 from alerts._state import (
@@ -64,6 +64,7 @@ def _build_market_context(
     """공통 MarketContext 생성. 데이터 부족 시 None 반환."""
     candles_1d = info.get("candles_1d", [])
     if len(candles_1d) < 12:
+        logger.warning("[신호] %s 일봉 부족 (%d개 < 12) — 전략 평가 불가", name, len(candles_1d))
         return None
 
     current_price = int(info.get("current_price", 0))
@@ -178,7 +179,7 @@ def _process_signal(
                         else ("dead" if _ph > 0 and _h <= 0 else None)
                     )
 
-        # vol_ratio가 nan이면 kiwoom_data에서 직접 계산
+        # vol_ratio가 nan이거나 float 아니면 kiwoom_data에서 직접 계산 (master 타입 안전 버전 채택)
         import math
         if math.isnan(_sig_vol) if isinstance(_sig_vol, float) else True:
             _cur_vol = int(info.get("volume", 0))
@@ -313,12 +314,14 @@ def check_signals() -> None:
     regime_params = engine.params
     logger.debug("[신호] 레짐: %s, 파라미터: slots=%d, buy=%s", regime.value, regime_params.max_slots, regime_params.buy_allowed)
 
-    # CASH: 전량 청산, 매매 금지
+    # CASH/DEFENSE 레짐 처리 — MOCK/LIVE 공통 적용 (리스크 매니저 VETO 반영)
+    # 이전 MOCK 우회는 "청산→매수 루프 방지" 목적이었으나,
+    # CASH 청산을 스킵하면 손절 방어선 자체가 무력화되어 VETO 행사됨.
+    # 대신 CASH 레짐 자체가 과도하게 자주 발동되지 않도록 macro_regime.py 임계값을 현실화해 대응.
     if regime == RegimeState.CASH:
         _execute_regime_liquidation(data, engine)
         return
 
-    # DEFENSE: 50% 축소, 신규 매수 금지
     if regime == RegimeState.DEFENSE:
         _execute_defense_cuts(data, engine)
         return
@@ -343,7 +346,9 @@ def check_signals() -> None:
 
     for ticker, info in data.get("stocks", {}).items():
         try:
-            if not is_whitelisted(ticker):
+            # 감시 대상 (102종목 = BACKTEST_VERIFIED 7 + MOCK_WATCH_EXTENDED 95) 체크
+            # 실제 매매는 trade_executor에서 is_whitelisted로 한번 더 필터링
+            if not is_watched(ticker):
                 continue
             name = info.get("name", ticker)
 
@@ -384,7 +389,8 @@ def check_interest_spikes() -> None:
 
         if price == 0:
             continue
-        if not is_whitelisted(ticker):
+        # 감시 대상이면 급등락 알림 허용 (매매는 아님)
+        if not is_watched(ticker):
             continue
         if abs(change_rate) < INTEREST_SPIKE_THRESHOLD:
             continue
@@ -515,9 +521,9 @@ def _execute_regime_liquidation(data: dict, engine) -> None:
                 pnl=pnl,
             )
             if pnl < 0:
-                record_loss_and_stoploss(abs(pnl))
+                record_loss_and_stoploss(abs(pnl), mock=True)
             else:
-                reset_consec_stoploss()
+                reset_consec_stoploss(mock=True)
             del positions[ticker]
             liquidated.append(name)
         else:
@@ -666,9 +672,9 @@ def check_eod_liquidation() -> None:
                 pass
             # 손실 기록
             if pnl < 0:
-                record_loss_and_stoploss(abs(pnl))
+                record_loss_and_stoploss(abs(pnl), mock=True)
             else:
-                reset_consec_stoploss()
+                reset_consec_stoploss(mock=True)
             del positions[ticker]
             liquidated.append(f"{name} {pnl:+,}원")
         else:

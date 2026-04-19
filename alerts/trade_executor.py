@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime
 
 from alerts.file_io import (
@@ -71,16 +72,25 @@ def _configure(
 # 매수 금액 계산
 # ---------------------------------------------------------------------------
 
-def _calc_trade_amount() -> int:
-    """슬롯별 매수 금액 계산.
+def _calc_trade_amount(price: int = 0) -> int:
+    """슬롯별 매수 금액 계산 (master 구조 + son-dev price 파라미터 병합).
 
-    - MOCK 모드: 수동 포지션과 완전 분리. AUTO_TRADE_AMOUNT를 슬롯당 고정 예산으로 사용.
-      (사용자 요청: "수동은 없는 거라고 보고, 자동만 시드머니 100만원")
+    - MOCK 모드: 수동 포지션과 완전 분리. AUTO_TRADE_AMOUNT 슬롯당 고정 예산.
+      (사용자 요청: "수동은 없는 거라고 보고, 자동만 시드머니 N만원")
       → AUTO_TRADE_AMOUNT × MAX_SLOTS = 자동매매 전용 시드
     - LIVE 모드: 실제 예수금 기반 계산 (과매수 방지).
+
+    Args:
+        price: 대상 종목 현재가. LIVE에서 슬롯 예산 < 1주 가격일 때 1주 금액까지 증액
+               (비싼 종목 매수 허용, MAX_ORDER_AMOUNT 범위 내, 예수금 내에서만).
+
+    VETO 방어선 유지 (리스크 매니저 복구):
+    - 레짐별 max_slots 오버라이드 (MOCK/LIVE 공통)
+    - manual 포지션 슬롯 제외
+    - MAX_ORDER_AMOUNT 상한 (단일 종목 집중 방지)
     """
     try:
-        # 레짐별 max_slots 오버라이드 (공통)
+        # 레짐별 max_slots 오버라이드 (공통 — MOCK도 레짐 제약 준수)
         effective_max_slots = MAX_SLOTS
         try:
             from strategies.regime_engine import get_regime_engine
@@ -115,8 +125,20 @@ def _calc_trade_amount() -> int:
             logger.info("[시드머니] 예수금 0 → 매수 불가")
             return 0
         amount = balance // free_slots
+        # MAX_ORDER_AMOUNT 상한 복구 (리스크 매니저 VETO 반영)
+        # 단일 종목 집중 방지 — 아무리 비싼 종목이라도 MAX_ORDER_AMOUNT 초과 매수 금지
         if amount > MAX_ORDER_AMOUNT:
             amount = MAX_ORDER_AMOUNT
+        # 비싼 종목 1주 매수 허용 (단, MAX_ORDER_AMOUNT 범위 내에서만)
+        if price > 0 and amount < price:
+            if price <= MAX_ORDER_AMOUNT and price <= balance:
+                logger.info("[시드머니] 슬롯예산 %s원 < 현재가 %s원 → 1주 금액으로 증액 (상한 %s원 내)",
+                            f"{amount:,}", f"{price:,}", f"{MAX_ORDER_AMOUNT:,}")
+                amount = price
+            else:
+                logger.info("[시드머니] 현재가 %s원 > 주문 상한 %s원 → 매수 불가",
+                            f"{price:,}", f"{MAX_ORDER_AMOUNT:,}")
+                return 0
         if amount < 10000:
             logger.info("[시드머니] 슬롯 예산 %s원 < 최소 1만원 → 매수 불가", f"{amount:,}")
             return 0
@@ -177,12 +199,12 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
         if not ai_decision:
             logger.debug("[자동매매] %s AI 미응답 → AI 없이 진행", name)
 
-        # 방어 체크
-        if is_monthly_loss_exceeded():
-            logger.warning("[자동매매] 월간 손실 한도 초과 → 매수 차단")
+        # 방어 체크 (MOCK은 별도 파일 기준)
+        if is_monthly_loss_exceeded(mock=MOCK_MODE):
+            logger.warning("[자동매매] 월간 손실 한도 초과 → 매수 차단%s", " [MOCK]" if MOCK_MODE else "")
             return
-        if is_consec_stoploss_exceeded():
-            logger.warning("[자동매매] 연속 손절 한도 초과 → 매수 차단")
+        if is_consec_stoploss_exceeded(mock=MOCK_MODE):
+            logger.warning("[자동매매] 연속 손절 한도 초과 → 매수 차단%s", " [MOCK]" if MOCK_MODE else "")
             return
         if is_daily_loss_exceeded():
             logger.warning("[자동매매] 일일 손실 한도 초과 → 매수 차단")
@@ -208,16 +230,14 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
             logger.info("[자동매매] %s 필터 제외: %s", name, reason)
             return
 
-        # 하루 동일 종목 매매 횟수 제한 — 데이트레이딩 재진입 무한루프 방지
+        # 하루 동일 종목 매매 횟수 제한 (master 추가 — 데이트레이딩 재진입 무한루프 방지)
         from alerts.market_guard import daily_buy_count_ok
         if not daily_buy_count_ok(ticker):
             return
 
-        # 저점 매수 필터 — 당일 고가 대비 N% 이상 눌렸을 때만 매수 (추격매수 방지)
+        # 저점 매수 필터 (master 추가) — 당일 고가 대비 N% 이상 눌렸을 때만 매수
         # 사용자 요청: "매수신호가 오면 최대한 저점에서 매수, 보유 인터벌 확보"
-        #
-        # ⚠️ 전략별 적용 제외: VB(변동성 돌파)는 "돌파 순간 즉시 매수"가 철학이라
-        # 저점 필터와 구조적 충돌 (돌파 직후에는 pullback ≈ 0).
+        # ⚠️ VB(변동성 돌파)는 "돌파 순간 즉시 매수"가 철학이라 필터 제외.
         # → trend_following / crisis_meanrev 등 추세/평균회귀 전략에만 적용.
         # 기본 0.3%, .env의 PULLBACK_PCT로 조정 가능.
         current_price_now = int(stock.get("current_price", 0))
@@ -227,9 +247,6 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
             PULLBACK_PCT = float(_os_pb.getenv("PULLBACK_PCT", "0.3"))
         except ValueError:
             PULLBACK_PCT = 0.3
-        # VB 계열만 명시적으로 필터 제외 (돌파 매수의 본질 보호).
-        # AutoStrategy dispatcher는 strategy_name을 "auto"로 덮어쓰므로 underlying_strategy 우선 확인.
-        # 전략명 불명(빈 문자열)이면 안전하게 필터 적용.
         underlying = (getattr(signal, "underlying_strategy", "") or "").lower()
         strategy_name = (getattr(signal, "strategy_name", "") or "").lower()
         is_breakout_strategy = (
@@ -247,13 +264,12 @@ def _auto_trade(ticker: str, name: str, signal: SignalResult,
                 )
                 return
 
-        # 금액 계산
-        amount = _calc_trade_amount()
-        if amount <= 0:
-            return
-
+        # 금액 계산 (son-dev price 파라미터 전달 — 비싼 종목 1주 매수 허용 로직 활용)
         price = current_price_now
         if price <= 0:
+            return
+        amount = _calc_trade_amount(price=price)
+        if amount <= 0:
             return
         quantity = amount // price
         if quantity <= 0:

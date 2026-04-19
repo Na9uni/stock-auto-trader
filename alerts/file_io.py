@@ -54,6 +54,7 @@ KIWOOM_DATA_PATH = ROOT / "data" / "kiwoom_data.json"
 AUTO_POSITIONS_PATH = ROOT / "data" / "auto_positions.json"
 ORDER_QUEUE_PATH = ROOT / "data" / "order_queue.json"
 MONTHLY_LOSS_PATH = ROOT / "data" / "monthly_loss.json"
+MONTHLY_LOSS_PATH_MOCK = ROOT / "data" / "monthly_loss_mock.json"
 TRADE_FILTER_PATH = ROOT / "data" / "trade_filter.json"
 
 
@@ -226,8 +227,16 @@ def _current_week_key() -> str:
     return datetime.now().strftime("%Y-W%W")
 
 
-def load_monthly_loss() -> dict:
+def _monthly_loss_path(mock: bool = False):
+    """MOCK 여부에 따라 경로 선택. LIVE 손실 누적과 MOCK 시뮬레이션 누적을 분리."""
+    return MONTHLY_LOSS_PATH_MOCK if mock else MONTHLY_LOSS_PATH
+
+
+def load_monthly_loss(mock: bool = False) -> dict:
     """monthly_loss.json 로드.
+
+    Args:
+        mock: True이면 monthly_loss_mock.json에서 로드 (MOCK 전용).
 
     Returns:
         {
@@ -237,19 +246,20 @@ def load_monthly_loss() -> dict:
             "weekly_loss": {"2026-W13": 0},
         }
     """
+    path = _monthly_loss_path(mock)
     default = {
         "month": _current_month_key(),
         "loss": 0,
         "consec_stoploss": 0,
         "weekly_loss": {},
     }
-    if not MONTHLY_LOSS_PATH.exists():
+    if not path.exists():
         return default
     try:
-        with open(MONTHLY_LOSS_PATH, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError) as exc:
-        logger.error("monthly_loss.json 로드 실패: %s", exc)
+        logger.error("%s 로드 실패: %s", path.name, exc)
         return default
 
     # 월이 바뀌었으면 리셋
@@ -263,16 +273,21 @@ def load_monthly_loss() -> dict:
     return data
 
 
-def save_monthly_loss(data: dict) -> None:
-    """monthly_loss.json 저장."""
-    tmp = MONTHLY_LOSS_PATH.with_suffix(".tmp")
+def save_monthly_loss(data: dict, mock: bool = False) -> None:
+    """monthly_loss.json 저장.
+
+    Args:
+        mock: True이면 monthly_loss_mock.json에 저장.
+    """
+    path = _monthly_loss_path(mock)
+    tmp = path.with_suffix(".tmp")
     try:
-        MONTHLY_LOSS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        tmp.replace(MONTHLY_LOSS_PATH)
+        tmp.replace(path)
     except OSError as exc:
-        logger.error("monthly_loss.json 저장 실패: %s", exc)
+        logger.error("%s 저장 실패: %s", path.name, exc)
         if tmp.exists():
             tmp.unlink(missing_ok=True)
 

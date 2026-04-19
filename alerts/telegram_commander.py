@@ -54,13 +54,15 @@ def start_telegram_commander() -> None:
     .env의 TELEGRAM_COMMANDER_ENABLED=false면 실행 안 함 (서브 PC용).
     같은 봇을 두 PC에서 polling하면 409 Conflict 에러가 반복 발생하므로,
     메인 PC에서만 commander를 돌리고 서브는 알림 발송만 담당한다.
+    (아들 PC: true, 아빠 PC: false 권장.)
     """
     if not _BOT_TOKEN:
         logger.warning("TELEGRAM_BOT_TOKEN 미설정 — 텔레그램 commander 비활성화")
         return
+    # master 강건 체크 채택 — false/0/no/off 모두 비활성으로 인식
     enabled = os.getenv("TELEGRAM_COMMANDER_ENABLED", "true").strip().lower()
     if enabled in ("false", "0", "no", "off"):
-        logger.info("TELEGRAM_COMMANDER_ENABLED=false — 텔레그램 commander 비활성화 (서브 PC 모드)")
+        logger.info("TELEGRAM_COMMANDER_ENABLED=false — 텔레그램 commander 비활성화 (서브 PC 모드, 알림 송신은 유지)")
         return
     t = threading.Thread(target=_polling_loop, daemon=True, name="TelegramCommander")
     t.start()
